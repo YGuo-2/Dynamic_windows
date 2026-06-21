@@ -1,0 +1,16 @@
+{
+  "_comment": "把下面的 hooks 和 statusLine 合并进 ~/.claude/settings.json（即 C:/Users/ny/.claude/settings.json）。如果该文件已有内容，请手动合并，不要整体覆盖。",
+
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "PreToolUse":  [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }]
+  },
+
+  "statusLine": {
+    "type": "command",
+    "command": "curl -s -X POST http://127.0.0.1:7777/claude/status --data-binary @- ; echo ' '"
+  }
+}

@@ -1,0 +1,40 @@
+# 把下面内容合并进 ~/.codex/config.toml（即 C:/Users/ny/.codex/config.toml）。
+# Windows 上 Codex 用 commandWindows 覆盖（curl.exe 系统自带）。
+# 首次运行可能需要在 Codex 中“信任”这些 hooks。
+
+features.hooks = true
+
+[[hooks.UserPromptSubmit]]
+matcher = "*"
+[[hooks.UserPromptSubmit.hooks]]
+type = "command"
+command        = ["curl",     "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+commandWindows = ["curl.exe", "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+
+[[hooks.PreToolUse]]
+matcher = "*"
+[[hooks.PreToolUse.hooks]]
+type = "command"
+command        = ["curl",     "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+commandWindows = ["curl.exe", "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+
+[[hooks.PostToolUse]]
+matcher = "*"
+[[hooks.PostToolUse.hooks]]
+type = "command"
+command        = ["curl",     "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+commandWindows = ["curl.exe", "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+
+[[hooks.PermissionRequest]]
+matcher = "*"
+[[hooks.PermissionRequest.hooks]]
+type = "command"
+command        = ["curl",     "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+commandWindows = ["curl.exe", "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+
+[[hooks.Stop]]
+matcher = "*"
+[[hooks.Stop.hooks]]
+type = "command"
+command        = ["curl",     "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]
+commandWindows = ["curl.exe", "-s", "-X", "POST", "http://127.0.0.1:7777/codex", "--data-binary", "@-"]

@@ -1,0 +1,47 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  DynamicIsland 发行版安装程序(WiX v4+/v7 schema)。
+  自包含发布(dist/publish,内嵌 .NET 10 运行时,对方免装)→ 装到 Program Files\DynamicIsland,
+  生成开始菜单快捷方式 + 添加/删除程序(ARP)卸载项。
+  编译:wix build setup/DynamicIsland.wxs -b pub=dist/publish -arch x64 -o dist/DynamicIsland-1.0.0-win-x64.msi
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package Name="DynamicIsland"
+           Manufacturer="DynamicIsland"
+           Version="1.0.0"
+           Scope="perMachine"
+           UpgradeCode="7B3A1F2C-9D4E-4A6B-8C1D-2E5F6A7B8C9D">
+
+    <!-- 同 UpgradeCode 的新版本覆盖安装旧版本 -->
+    <MajorUpgrade DowngradeErrorMessage="已安装更新版本的 DynamicIsland。" />
+
+    <!-- cab 内嵌进单个 msi,产物就是一个文件 -->
+    <MediaTemplate EmbedCab="yes" />
+
+    <!-- 安装目录:Program Files\DynamicIsland -->
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="DynamicIsland" />
+    </StandardDirectory>
+
+    <!-- 开始菜单目录:程序\DynamicIsland -->
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="AppShortcutFolder" Name="DynamicIsland" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="DynamicIsland" Level="1">
+      <!-- 批量打包整个 publish 目录(自动 harvest,免手列上百个 dll) -->
+      <Files Directory="INSTALLFOLDER" Include="!(bindpath.pub)\**" />
+
+      <!-- 开始菜单快捷方式组件 -->
+      <Component Id="StartMenuShortcut" Directory="AppShortcutFolder" Guid="A1C2E3F4-5B6D-47E8-9F10-1122334455AA">
+        <Shortcut Id="AppShortcut"
+                  Name="DynamicIsland"
+                  Description="iOS 灵动岛风格的终端 AI agent 状态悬浮窗"
+                  Target="[INSTALLFOLDER]DynamicIsland.App.exe"
+                  WorkingDirectory="INSTALLFOLDER" />
+        <RemoveFolder Id="RemoveAppShortcutFolder" Directory="AppShortcutFolder" On="uninstall" />
+        <RegistryValue Root="HKMU" Key="Software\DynamicIsland" Name="installed" Type="integer" Value="1" KeyPath="yes" />
+      </Component>
+    </Feature>
+  </Package>
+</Wix>

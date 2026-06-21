@@ -1,0 +1,26 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+publish/
+*.user
+
+# Distribution / installer artifacts
+dist/
+
+# Logs
+*.log
+
+# IDE / OS
+.vs/
+.idea/
+*.suo
+Thumbs.db
+.DS_Store
+
+# Claude Code local (machine-specific) settings — keep project hooks (settings.json), ignore local
+.claude/settings.local.json
+
+# Sensitive backups
+*.bak

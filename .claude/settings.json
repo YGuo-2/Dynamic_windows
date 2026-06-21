@@ -1,0 +1,9 @@
+{
+  "hooks": {
+    "UserPromptSubmit": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "PreToolUse":  [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "PostToolUse": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "Notification": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }],
+    "Stop": [{ "hooks": [{ "type": "command", "command": "curl -s -X POST http://127.0.0.1:7777/claude --data-binary @-" }] }]
+  }
+}

@@ -1,0 +1,6 @@
+<Application x:Class="DynamicIsland.App.App"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    <!-- 不用 StartupUri：窗口与采集服务在 App.OnStartup 里手动创建 -->
+    <Application.Resources/>
+</Application>
