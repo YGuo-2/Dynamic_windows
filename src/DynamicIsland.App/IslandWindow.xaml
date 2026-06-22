@@ -38,7 +38,8 @@
                  只裁剪可见区，标题行布局位置不随高度变化 → 收缩时圆点/文字不抖 -->
             <Grid x:Name="ClipHost">
                 <Grid Height="300" VerticalAlignment="Top">
-                    <!-- 标题行：固定占顶部 28 高，内部圆点/文字垂直居中（= 横条态外观）-->
+                    <!-- 标题行：固定占顶部 28 高，内部圆点/文字垂直居中（= 横条态外观）。
+                         多会话时「主状态 ┊ 副点」整组靠 HorizontalAlignment=Center 一同居中（无外挂、无右挂拖尾）。-->
                     <StackPanel x:Name="TitleRow" Orientation="Horizontal" Height="28"
                                 HorizontalAlignment="Center" VerticalAlignment="Top">
                         <Ellipse x:Name="Dot" Width="9" Height="9"
@@ -50,6 +51,13 @@
                                    Opacity="0"
                                    Visibility="Collapsed"
                                    TextTrimming="CharacterEllipsis"/>
+                        <!-- 副会话点：收进药丸内部（标题行右段，squircle 裁剪区内），前置细竖分隔条把主状态与副会话分开。
+                             仅多会话由 C# RenderSatellites 填充并显示状态色点；hover 展开时整组淡出。 -->
+                        <Rectangle x:Name="SatSeparator" Width="1" Height="14"
+                                   Fill="#3AFFFFFF" Margin="9,0,0,0"
+                                   VerticalAlignment="Center" Visibility="Collapsed"/>
+                        <StackPanel x:Name="Satellites" Orientation="Horizontal"
+                                    Margin="8,0,0,0" VerticalAlignment="Center"/>
                     </StackPanel>
 
                     <!-- 详情面板：固定在标题下方，靠 Opacity 显隐（位置不动）。
@@ -100,10 +108,5 @@
                 </Path.Effect>
             </Path>
         </Grid>
-
-        <!-- 副会话点：其余活跃会话缩成的小圆点，贴主药丸右侧、独立定位（不参与主药丸居中）。
-             C# RenderSatellites 动态填充 Ellipse 并按主药丸右边缘设 Margin.Left；hover 展开时淡出。 -->
-        <StackPanel x:Name="Satellites" Orientation="Horizontal"
-                    HorizontalAlignment="Left" VerticalAlignment="Top"/>
     </Grid>
 </Window>

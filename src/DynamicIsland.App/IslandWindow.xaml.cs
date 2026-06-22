@@ -52,7 +52,8 @@ public partial class IslandWindow : Window
     // —— 多会话生命周期（M3）——
     private const double DoneLingerSeconds = 6;   // 完成态保留多久后数据回落 Idle（替代旧单例 _doneTimer 的 4s）
     private const double IdleEvictSeconds = 30;   // Idle 多久后从 _sessions 移除，防字典无限增长
-    private const int MaxSatellites = 4;          // 副会话点最多铺开数，超出折叠成「+N」
+    private const int MaxSatellites = 3;          // 副会话点最多铺开数，超出折叠成「+N」（收进岛内，宜少）
+    private const int MaxSessionTabs = 3;          // 详情卡会话切换行最多标签数，超出折叠成「+N」（详情卡宽 ~260）
 
     // —— 完成态流光：绿色辉光弧沿 squircle 边缘绕圈（StrokeDashArray 原生描边动画，渲染线程驱动，平时零开销）——
     private const double GlowArcFraction = 0.30;       // 亮弧占周长比例（其余透明）
@@ -133,6 +134,7 @@ public partial class IslandWindow : Window
     // —— 多会话渲染状态（M3）——
     private Session? _activeRendered;                       // 主药丸当前渲染的会话（PickActive 选出，脏检查用）
     private IslandStatus _renderedStatus = IslandStatus.Idle; // 主药丸渲染态（脏检查：会话/状态没变不重画）
+    private double _renderedSatWidth = 0;                   // 上次渲染的副点区宽度（脏检查：副会话增减/变色也触发横条态重画）
     private Session? _displayed;                            // 详情卡当前显示的会话（hover 中 = pin 或主会话）
     private Session? _toolHoldTarget;                       // _toolHoldTimer 武装时的目标会话（只对它回落）
     private string? _pinnedKey;                             // 用户在详情卡锁定要看的 session_id；null = 跟随主会话
@@ -282,11 +284,15 @@ public partial class IslandWindow : Window
     private void RenderActive()
     {
         var pick = PickActive();
-        if (!ReferenceEquals(pick, _activeRendered) || (pick?.Status ?? IslandStatus.Idle) != _renderedStatus)
+        double satW = SatelliteStripWidth();
+        if (!ReferenceEquals(pick, _activeRendered)
+            || (pick?.Status ?? IslandStatus.Idle) != _renderedStatus
+            || satW != _renderedSatWidth)
         {
             _activeRendered = pick;
             _renderedStatus = pick?.Status ?? IslandStatus.Idle;
-            RenderPill(pick);
+            _renderedSatWidth = satW;
+            RenderPill(pick); // _compactWidth 重算（含副点区）→ 横条态宽度对称跟随
         }
         RenderSatellites();
 
@@ -350,7 +356,8 @@ public partial class IslandWindow : Window
         _statusText = text;
 
         Dot.Fill = ColorFor(status);
-        _compactWidth = status == IslandStatus.Idle ? CompactWidth : MeasureWidth(text);
+        // 横条态宽度 = 主状态宽 + 副点区宽（分隔条 + 副点）。药丸 HorizontalAlignment=Center + 对称变宽 → 整组居中，无右挂。
+        _compactWidth = (status == IslandStatus.Idle ? CompactWidth : MeasureWidth(text)) + SatelliteStripWidth();
 
         if (!_hovering)
         {
@@ -395,15 +402,16 @@ public partial class IslandWindow : Window
         else StopGlow();
     }
 
-    // —— 副会话点（Phase D）：除主会话外的活跃会话缩成小圆点，贴主药丸右侧，按状态色，超 MaxSatellites 折叠 ——
-    private const double SatelliteSize = 7;
-    private const double SatelliteGap = 6;   // 点之间 + 点与主药丸之间的间距
+    // —— 副会话点（M3 重做）：除主会话外的活跃会话收进药丸内部（标题行右段，squircle 裁剪区内），
+    //    药丸对称变宽容纳它们 → 整组仍居中，无右挂拖尾。按状态色，超 MaxSatellites 折叠「+N」 ——
+    private const double SatelliteSize = 9;        // 与主圆点 Dot 同量级，不再是噪点
+    private const double SatelliteGap = 7;         // 副点之间间距
+    private const double SatSeparatorReserve = 18; // 分隔条占位（分隔条 Margin.Left 9 + Satellites Margin.Left 8 + 线宽 1）
     private static readonly Brush SatelliteOverflowBrush = MakeBrush(0x5A, 0x5C, 0x64); // 折叠点：暗灰
 
-    private void RenderSatellites()
+    // 当前应铺开的副会话（除主会话外的非 Idle），按优先级 + 最近活动排序。宽度估算与渲染共用，保证一致。
+    private List<Session> ActiveSatellites()
     {
-        Satellites.Children.Clear();
-
         var others = new List<Session>();
         foreach (var s in _sessions.Values)
             if (!ReferenceEquals(s, _activeRendered) && s.Status != IslandStatus.Idle)
@@ -413,28 +421,38 @@ public partial class IslandWindow : Window
             int w = Weight(b.Status).CompareTo(Weight(a.Status));
             return w != 0 ? w : b.LastActivity.CompareTo(a.LastActivity);
         });
+        return others;
+    }
 
-        if (others.Count == 0)
+    // 副点区在横条态占的额外宽度（分隔条 + n 颗点 + 颗间间距 + 可能的 +N 折叠点）。
+    // 计入 _compactWidth → 药丸对称变宽、整组居中。idle 态 / 无副点时为 0。
+    private double SatelliteStripWidth()
+    {
+        int total = ActiveSatellites().Count;
+        if (total == 0) return 0;
+        int dots = Math.Min(total, MaxSatellites) + (total > MaxSatellites ? 1 : 0);
+        return SatSeparatorReserve + dots * SatelliteSize + (dots - 1) * SatelliteGap;
+    }
+
+    private void RenderSatellites()
+    {
+        Satellites.Children.Clear();
+
+        var others = ActiveSatellites();
+        if (others.Count == 0 || _hovering)
         {
+            // 无副会话，或 hover 展开（详情卡 SessionTabs 接管）→ 整组隐藏
+            SatSeparator.Visibility = Visibility.Collapsed;
             Satellites.Visibility = Visibility.Collapsed;
             return;
         }
+        SatSeparator.Visibility = Visibility.Visible;
         Satellites.Visibility = Visibility.Visible;
 
         int shown = Math.Min(others.Count, MaxSatellites);
         for (int i = 0; i < shown; i++) Satellites.Children.Add(MakeSatelliteDot(others[i]));
         int rest = others.Count - shown;
         if (rest > 0) Satellites.Children.Add(MakeOverflowDot(rest));
-
-        PositionSatellites();
-    }
-
-    // 主药丸顶部居中、高 28、Margin.Top=18 → 中线在窗口 Y=32；副点高 7 → 顶 28.5。
-    // 主药丸右边缘窗口 X = (Width + _compactWidth)/2；副点紧贴其右 + 间距。
-    private void PositionSatellites()
-    {
-        double pillRight = (Width + _compactWidth) / 2;
-        Satellites.Margin = new Thickness(pillRight + SatelliteGap, 18 + (PillCompactHeight - SatelliteSize) / 2, 0, 0);
     }
 
     private Ellipse MakeSatelliteDot(Session s)
@@ -460,7 +478,7 @@ public partial class IslandWindow : Window
 
     private Border MakeOverflowDot(int rest) => new()
     {
-        Width = SatelliteSize + 4,
+        Width = SatelliteSize + 5,
         Height = SatelliteSize,
         CornerRadius = new CornerRadius(SatelliteSize / 2),
         Background = SatelliteOverflowBrush,
@@ -470,14 +488,11 @@ public partial class IslandWindow : Window
         {
             Text = $"+{rest}",
             Foreground = Brushes.White,
-            FontSize = 6.5,
+            FontSize = 7,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         }
     };
-
-    private void FadeSatellites(double to) =>
-        BeginDouble(Satellites, OpacityProperty, to, 0.2);
 
     // —— 详情卡会话切换行（Phase E）：每会话一个圆角标签，点击 pin；当前显示的高亮 ——
     private static readonly Brush TabBg       = MakeBrush2(0x1A, 0xFF, 0xFF, 0xFF); // 普通标签底
@@ -501,8 +516,18 @@ public partial class IslandWindow : Window
             return w != 0 ? w : b.LastActivity.CompareTo(a.LastActivity);
         });
 
-        foreach (var s in all)
+        // 当前显示的会话务必在列（即便排在折叠区外），保证用户 pin 的标签可见且高亮
+        int shown = Math.Min(all.Count, MaxSessionTabs);
+        var visible = new List<Session>(all.GetRange(0, shown));
+        if (_displayed != null && !visible.Contains(_displayed) && all.Contains(_displayed))
+        {
+            visible[shown - 1] = _displayed; // 顶掉折叠边界处一个，确保当前会话在列
+        }
+        foreach (var s in visible)
             SessionTabs.Children.Add(MakeSessionTab(s, ReferenceEquals(s, _displayed)));
+
+        int rest = all.Count - shown;
+        if (rest > 0) SessionTabs.Children.Add(MakeSessionTabsOverflow(rest));
     }
 
     private Border MakeSessionTab(Session s, bool active)
@@ -517,21 +542,22 @@ public partial class IslandWindow : Window
         });
         row.Children.Add(new TextBlock
         {
-            Text = ShortCwd(s.Cwd),
+            Text = LeafCwd(s.Cwd), // 标签只显示末段目录名（".../a/b" 在窄标签里既被裁又冗余）
             Foreground = active ? Brushes.White : TodoPendingBrush,
             FontSize = 11,
             VerticalAlignment = VerticalAlignment.Center,
             TextTrimming = TextTrimming.CharacterEllipsis,
-            MaxWidth = 92
+            MaxWidth = 40 // 3 标签 + 折叠点 4 项 × (30 固定 + 40 文字) ≤ 252px ≤ 260 DetailWidth
         });
         var tab = new Border
         {
             CornerRadius = new CornerRadius(8),
             Background = active ? TabBgActive : TabBg,
-            Padding = new Thickness(8, 3, 8, 3),
-            Margin = new Thickness(3, 0, 3, 0),
+            Padding = new Thickness(7, 3, 7, 3),
+            Margin = new Thickness(2, 0, 2, 0),
             Cursor = Cursors.Hand,
             Tag = s.Key,
+            ToolTip = ShortCwd(s.Cwd), // hover 显示完整短路径（标签里只显示末段名）
             Child = row
         };
         tab.MouseLeftButtonUp += (sender, _) =>
@@ -540,6 +566,23 @@ public partial class IslandWindow : Window
         };
         return tab;
     }
+
+    // 会话标签折叠点：超 MaxSessionTabs 的会话数收成「+N」（与副点折叠同款语义，不可点）
+    private Border MakeSessionTabsOverflow(int rest) => new()
+    {
+        CornerRadius = new CornerRadius(8),
+        Background = TabBg,
+        Padding = new Thickness(7, 3, 7, 3),
+        Margin = new Thickness(2, 0, 2, 0),
+        ToolTip = $"还有 {rest} 个会话",
+        Child = new TextBlock
+        {
+            Text = $"+{rest}",
+            Foreground = TodoPendingBrush,
+            FontSize = 11,
+            VerticalAlignment = VerticalAlignment.Center
+        }
+    };
 
     // 详情卡里锁定查看某会话（主药丸仍按优先级自动切换，互不干扰）。
     private void PinSession(string key)
@@ -601,7 +644,7 @@ public partial class IslandWindow : Window
     {
         _hovering = true;
         StopPillPulse();
-        FadeSatellites(0.0); // 主药丸展开会盖住副点 → 淡出
+        RenderSatellites(); // 收进药丸的副点在展开态会挤偏居中标题 → 整组收起（_hovering 判定），详情卡 SessionTabs 接管
 
         // 进入详情卡：未 pin → 显示当前主会话
         _pinnedKey = null;
@@ -633,7 +676,8 @@ public partial class IslandWindow : Window
         _hovering = false;
         _hoverTimer.Stop();
         _pinnedKey = null; // 离开取消 pin，下次 hover 回自动跟随主会话
-        FadeSatellites(1.0);
+        Satellites.Opacity = 1.0;
+        RenderSatellites(); // 回横条态：副点重新铺回药丸内部
 
         BeginDouble(DetailPanel, OpacityProperty, 0.0, 0.23);
 
@@ -889,6 +933,14 @@ public partial class IslandWindow : Window
         if (segs.Length == 0) return cwd;
         if (segs.Length == 1) return segs[^1];
         return ".../" + segs[^2] + "/" + segs[^1];
+    }
+
+    // 会话标签用：只取末段目录名（窄标签放不下完整路径，靠 ToolTip 补全路径）
+    private static string LeafCwd(string cwd)
+    {
+        if (string.IsNullOrEmpty(cwd)) return "—";
+        var segs = cwd.Replace('\\', '/').TrimEnd('/').Split('/', StringSplitOptions.RemoveEmptyEntries);
+        return segs.Length == 0 ? cwd : segs[^1];
     }
 
     private double MeasureWidth(string text)
