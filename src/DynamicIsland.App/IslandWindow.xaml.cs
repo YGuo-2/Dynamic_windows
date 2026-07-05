@@ -12,6 +12,15 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using DynamicIsland.Core.Ingest;
 using DynamicIsland.Core.Model;
+using DynamicIsland.Core.State;
+using Brush = System.Windows.Media.Brush;
+using Brushes = System.Windows.Media.Brushes;
+using Color = System.Windows.Media.Color;
+using Cursors = System.Windows.Input.Cursors;
+using FontFamily = System.Windows.Media.FontFamily;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using Orientation = System.Windows.Controls.Orientation;
+using Size = System.Windows.Size;
 
 namespace DynamicIsland.App;
 
@@ -50,9 +59,6 @@ public partial class IslandWindow : Window
     private const double ToolHoldSeconds = 1.2;
 
     // —— 多会话生命周期（M3）——
-    private const double DoneLingerSeconds = 6;   // 完成态保留多久后数据回落 Idle（替代旧单例 _doneTimer 的 4s）
-    private const double IdleEvictSeconds = 30;   // Idle 多久后从 _sessions 移除，防字典无限增长
-    private const double WaitEvictSeconds = 180;  // 等待批准最长保留（兜底）：超时无任何后续事件则回落 Idle，防误标永久卡死
     private const int MaxSatellites = 3;          // 副会话点最多铺开数，超出折叠成「+N」（收进岛内，宜少）
     private const int MaxSessionTabs = 3;          // 详情卡会话切换行最多标签数，超出折叠成「+N」（详情卡宽 ~260）
 
@@ -114,22 +120,26 @@ public partial class IslandWindow : Window
     // 多个项目并发也互不串台；M3 多药丸时每个 Session 各点亮一颗。
     private sealed class Session
     {
+        public readonly AgentSessionState Agent = new();
         public string Key = "";              // session_id（反查：副点点击 / pin / prune）
-        public DateTime LastActivity;        // 每次 OnEvent 命中刷新；prune 与同权重排序据此
         public string Cwd = "";
-        public string Tool = "";
         public string Model = "—";
         public string Effort = "—";
         public string Context = "—";
         public string CurrentTask = "";
         public IReadOnlyList<TodoItem> Todos = Array.Empty<TodoItem>(); // 多行清单数据源（空数组：渲染端不判 null）
         public string? TranscriptPath;
-        public long LastTranscriptLen = -1; // 上次读取时的文件长度；未变则跳过全量重读（省大会话每事件几 MB 的解析 + LOH 分配）
-        public IslandStatus Status = IslandStatus.Idle;
-        public string StatusText = "";
-        public DateTime TurnStart;
-        public TimeSpan LastTurnElapsed = TimeSpan.Zero;
-        public bool TurnRunning;
+        public long LastTranscriptLen = -1; // 上次成功读取 usage 时的文件长度；失败不推进，避免错过最终读数
+        public TranscriptReader.TaskSnapshotCursor TaskCursor = new();
+        public bool TranscriptReadInFlight;
+
+        public DateTime LastActivity { get => Agent.LastActivity; set => Agent.LastActivity = value; }
+        public string Tool { get => Agent.Tool; set => Agent.Tool = value; }
+        public IslandStatus Status { get => Agent.Status; set => Agent.Status = value; }
+        public string StatusText { get => Agent.StatusText; set => Agent.StatusText = value; }
+        public DateTime TurnStart { get => Agent.TurnStart; set => Agent.TurnStart = value; }
+        public TimeSpan LastTurnElapsed { get => Agent.LastTurnElapsed; set => Agent.LastTurnElapsed = value; }
+        public bool TurnRunning { get => Agent.TurnRunning; set => Agent.TurnRunning = value; }
     }
 
     private readonly Dictionary<string, Session> _sessions = new();
@@ -163,9 +173,9 @@ public partial class IslandWindow : Window
         {
             _toolHoldTimer.Stop();
             var t = _toolHoldTarget;
-            if (t != null && t.Status == IslandStatus.RunningTool)
+            _toolHoldTarget = null;
+            if (t != null && AgentSessionStateMachine.ApplyToolHoldElapsed(t.Agent))
             {
-                ApplyStatus(t, IslandStatus.Thinking, "思考中…");
                 RenderActive();
             }
         };
@@ -200,7 +210,6 @@ public partial class IslandWindow : Window
             _sessions[key] = s;
         }
         s.Key = key;
-        s.LastActivity = DateTime.Now;
 
         if (!string.IsNullOrEmpty(evt.Cwd)) s.Cwd = evt.Cwd!;
         if (!string.IsNullOrEmpty(evt.Effort)) s.Effort = evt.Effort!;
@@ -208,42 +217,18 @@ public partial class IslandWindow : Window
         if (!string.IsNullOrEmpty(evt.CurrentTask)) s.CurrentTask = evt.CurrentTask!;
         if (evt.Todos is { Count: > 0 }) s.Todos = evt.Todos; // 仅非空覆盖：旧清单在后续非 TodoWrite 事件中保留
 
-        _toolHoldTimer.Stop(); // 任何新事件都取消待回落；PostToolUse 会重新武装
-
-        switch (evt.EventName)
+        // 只取消同一会话的待回落；多会话下 B 的事件不能误取消 A 的 tool-hold。
+        if (ReferenceEquals(s, _toolHoldTarget))
         {
-            case "UserPromptSubmit":
-                s.TurnStart = DateTime.Now; s.TurnRunning = true; s.Tool = "";
-                ApplyStatus(s, IslandStatus.Thinking, "思考中…");
-                break;
-            case "PreToolUse":
-                // TodoWrite 不是“动作”而是进度更新：不抢标题，维持思考态，只更新当前任务。
-                if (string.Equals(evt.Tool, "TodoWrite", StringComparison.OrdinalIgnoreCase))
-                {
-                    ApplyStatus(s, IslandStatus.Thinking, "思考中…");
-                }
-                else
-                {
-                    s.Tool = evt.Tool ?? "工具";
-                    ApplyStatus(s, IslandStatus.RunningTool, s.Tool);
-                }
-                break;
-            case "PostToolUse":
-                // 工具结束不立即回落：保留「⚙ 工具名」~ToolHoldSeconds，毫秒级工具（同秒 Pre+Post）也看得见；
-                // 期间来新事件会在 switch 前 Stop 并重设。只对当前主会话回落（副点只显状态色，无需防抖）。
-                if (s.Status == IslandStatus.RunningTool) { _toolHoldTarget = s; _toolHoldTimer.Start(); }
-                break;
-            case "Notification":
-                // Notification 有两种语义：① 工具权限请求 ② 空闲 60s 等待输入。仅前者是「等待批准」。
-                // 额外守卫：仅 TurnRunning（本轮未结束）才允许进 WaitingApproval，防止 Stop 先到后迟到的
-                // Notification（curl 异步乱序）把已 Done 的会话打回 WaitingApproval 且无法自动回落。
-                if (IsApprovalRequest(evt.Message) && s.TurnRunning)
-                    ApplyStatus(s, IslandStatus.WaitingApproval, "等待批准");
-                break;
-            case "Stop":
-                if (s.TurnRunning) { s.LastTurnElapsed = DateTime.Now - s.TurnStart; s.TurnRunning = false; }
-                ApplyStatus(s, IslandStatus.Done, "完成"); // Done 数据回落交给 _pruneTimer（DoneLingerSeconds）
-                break;
+            _toolHoldTimer.Stop();
+            _toolHoldTarget = null;
+        }
+
+        var eventResult = AgentSessionStateMachine.ApplyEvent(s.Agent, evt, DateTime.Now);
+        if (eventResult.ArmToolHold)
+        {
+            _toolHoldTarget = s;
+            _toolHoldTimer.Start();
         }
 
         RenderActive();
@@ -258,22 +243,8 @@ public partial class IslandWindow : Window
         }
     }
 
-    // —— 数据层：只写会话状态，不碰任何 XAML（OnEvent / prune / toolHold 调用）——
-    private void ApplyStatus(Session s, IslandStatus status, string text)
-    {
-        s.Status = status;
-        s.StatusText = text;
-    }
-
     // —— 优先级选主：WaitingApproval > RunningTool > Thinking > Done > Idle，同权重取最近活动 ——
-    private static int Weight(IslandStatus s) => s switch
-    {
-        IslandStatus.WaitingApproval => 4,
-        IslandStatus.RunningTool     => 3,
-        IslandStatus.Thinking        => 2,
-        IslandStatus.Done            => 1,
-        _                            => 0
-    };
+    private static int Weight(IslandStatus s) => AgentSessionStateMachine.Weight(s);
 
     private Session? PickActive()
     {
@@ -348,17 +319,17 @@ public partial class IslandWindow : Window
         List<string>? remove = null;
         foreach (var (key, s) in _sessions)
         {
-            if (s.Status == IslandStatus.Done && (now - s.LastActivity).TotalSeconds > DoneLingerSeconds)
+            var result = AgentSessionStateMachine.Prune(s.Agent, now);
+            if (result.Changed)
             {
-                s.Status = IslandStatus.Idle; s.StatusText = ""; changed = true;
+                changed = true;
+                if (ReferenceEquals(s, _toolHoldTarget) && s.Status != IslandStatus.RunningTool)
+                {
+                    _toolHoldTimer.Stop();
+                    _toolHoldTarget = null;
+                }
             }
-            // 等待批准兜底：批准动作在终端完成、本程序收不到「已批准」事件，正常会有后续 Pre/PostToolUse
-            // 推进状态；但若误标或会话静默，WaitingApproval（最高优先级）会永久占据主药丸 → 超时强制回落 Idle。
-            if (s.Status == IslandStatus.WaitingApproval && (now - s.LastActivity).TotalSeconds > WaitEvictSeconds)
-            {
-                s.Status = IslandStatus.Idle; s.StatusText = ""; s.TurnRunning = false; changed = true;
-            }
-            if (s.Status == IslandStatus.Idle && (now - s.LastActivity).TotalSeconds > IdleEvictSeconds)
+            if (result.Remove)
             {
                 (remove ??= new()).Add(key); changed = true;
             }
@@ -648,16 +619,6 @@ public partial class IslandWindow : Window
         AnimatePill(DetailWidth, DetailTargetHeight(), 0.29);
     }
 
-
-    // 空闲提醒 "Claude is waiting for your input" 不含 → false，不误报「等待批准」。message 缺失也按非权限处理。
-    private static bool IsApprovalRequest(string? message)
-    {
-        if (string.IsNullOrEmpty(message)) return false;
-        return message.Contains("permission", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("approve", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("approval", StringComparison.OrdinalIgnoreCase);
-    }
-
     private static Brush ColorFor(IslandStatus s) => s switch
     {
         IslandStatus.Thinking        => ThinkingBrush,
@@ -891,19 +852,26 @@ public partial class IslandWindow : Window
     {
         var path = s.TranscriptPath;
         if (string.IsNullOrEmpty(path)) return;
+        if (s.TranscriptReadInFlight) return;
+
+        s.TranscriptReadInFlight = true;
+        var lastTranscriptLen = s.LastTranscriptLen;
+        var taskCursor = s.TaskCursor;
         Task.Run(() =>
         {
-            // 文件长度未变 → transcript 无新内容，跳过全量读取（大会话每次几 MB 解析 + LOH 分配的元凶）。
+            // usage 仍按文件长度去重；长度只有在 ReadLatest 成功后才回写，失败不缓存为成功。
+            long len = -1;
+            bool readUsage = true;
             try
             {
-                long len = new System.IO.FileInfo(path!).Length;
-                if (len == s.LastTranscriptLen) return;
-                s.LastTranscriptLen = len;
+                len = new System.IO.FileInfo(path!).Length;
+                if (len == lastTranscriptLen) readUsage = false;
             }
             catch { }
-            var snap = TranscriptReader.ReadLatest(path!);
-            var taskSnap = TranscriptReader.ReadTaskSnapshot(path!);
-            if (snap is not { } v)
+
+            var snap = readUsage ? TranscriptReader.ReadLatest(path!) : null;
+            var taskSnap = TranscriptReader.ReadTaskSnapshotIncremental(path!, taskCursor);
+            if (readUsage && snap is not { })
             {
                 // 仅在读取失败时留一行线索，正常路径不刷日志。
                 try
@@ -915,8 +883,12 @@ public partial class IslandWindow : Window
             }
             Dispatcher.InvokeAsync(() =>
             {
+                s.TranscriptReadInFlight = false;
+                s.TaskCursor = taskSnap.Cursor;
+
                 if (snap is { } latest)
                 {
+                    if (len >= 0) s.LastTranscriptLen = len;
                     var model = PrettyModel(latest.Model) ?? s.Model;
                     var context = FormatContext(latest.UsedTokens, latest.ContextSize);
                     if (model != s.Model || context != s.Context)

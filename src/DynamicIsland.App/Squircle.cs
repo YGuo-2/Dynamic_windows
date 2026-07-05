@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Windows;
 using System.Windows.Media;
+using Point = System.Windows.Point;
 
 namespace DynamicIsland.App;
 

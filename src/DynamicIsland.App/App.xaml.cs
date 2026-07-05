@@ -2,6 +2,9 @@ using System.Net;
 using System.Windows;
 using DynamicIsland.Core.Ingest;
 using DynamicIsland.App.SystemInfo;
+using Forms = System.Windows.Forms;
+using Application = System.Windows.Application;
+using MessageBox = System.Windows.MessageBox;
 
 namespace DynamicIsland.App;
 
@@ -14,13 +17,17 @@ public partial class App : Application
     private IngestServer? _server;
     private IslandWindow? _island;
     private readonly List<IInfoSource> _sources = new();
+    private Forms.NotifyIcon? _trayIcon;
+    private Forms.ToolStripMenuItem? _toggleIslandItem;
 
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        ShutdownMode = ShutdownMode.OnExplicitShutdown;
 
         _island = new IslandWindow();
         _island.Show();
+        CreateTrayIcon();
 
         _server = new IngestServer();
         _server.EventReceived += evt =>
@@ -51,8 +58,60 @@ public partial class App : Application
         _island?.AddSource(src);
     }
 
+    private void CreateTrayIcon()
+    {
+        var menu = new Forms.ContextMenuStrip();
+        _toggleIslandItem = new Forms.ToolStripMenuItem("隐藏灵动岛");
+        _toggleIslandItem.Click += (_, _) => ToggleIslandVisibility();
+        menu.Items.Add(_toggleIslandItem);
+        menu.Items.Add(new Forms.ToolStripSeparator());
+
+        var exitItem = new Forms.ToolStripMenuItem("退出");
+        exitItem.Click += (_, _) => Dispatcher.InvokeAsync(Shutdown);
+        menu.Items.Add(exitItem);
+
+        _trayIcon = new Forms.NotifyIcon
+        {
+            Text = "DynamicIsland",
+            Icon = System.Drawing.SystemIcons.Application,
+            ContextMenuStrip = menu,
+            Visible = true
+        };
+        _trayIcon.DoubleClick += (_, _) => ToggleIslandVisibility();
+    }
+
+    private void ToggleIslandVisibility()
+    {
+        Dispatcher.InvokeAsync(() =>
+        {
+            if (_island is not { } island) return;
+
+            if (island.IsVisible)
+                island.Hide();
+            else
+            {
+                island.Show();
+            }
+
+            UpdateTrayText();
+        });
+    }
+
+    private void UpdateTrayText()
+    {
+        if (_toggleIslandItem == null || _island == null) return;
+        _toggleIslandItem.Text = _island.IsVisible ? "隐藏灵动岛" : "显示灵动岛";
+    }
+
     protected override void OnExit(ExitEventArgs e)
     {
+        if (_trayIcon != null)
+        {
+            _trayIcon.Visible = false;
+            _trayIcon.ContextMenuStrip?.Dispose();
+            _trayIcon.Dispose();
+            _trayIcon = null;
+        }
         foreach (var s in _sources) s.Stop();
         _server?.Dispose();
         base.OnExit(e);

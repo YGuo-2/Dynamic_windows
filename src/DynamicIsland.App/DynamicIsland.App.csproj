@@ -7,6 +7,7 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <UseWPF>true</UseWPF>
+    <UseWindowsForms>true</UseWindowsForms>
     <!-- 发行元数据(exe 文件属性 + MSI 读取);RuntimeIdentifier/SelfContained 不写死,由 publish 命令行传,保持日常 Debug 构建不变 -->
     <Version>1.0.0</Version>
     <Company>DynamicIsland</Company>
