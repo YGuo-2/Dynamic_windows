@@ -16,97 +16,118 @@
 
     <!-- 根 Grid 不设 Background（null）：空白处不参与命中测试，不挡桌面点击 -->
     <Grid>
-        <!-- 外层：圆角背景 + 阴影，不做裁剪 → 阴影跟随圆角 -->
-        <Grid x:Name="Pill"
-              Width="84" Height="28"
-              VerticalAlignment="Top"
-              HorizontalAlignment="Center"
-              Margin="0,18,0,0"
-              RenderTransformOrigin="0.5,0.5">
-            <Grid.RenderTransform>
-                <ScaleTransform x:Name="PillScale" ScaleX="1" ScaleY="1"/>
-            </Grid.RenderTransform>
+        <!-- 主岛 + 副会话岛「分裂形态」（iOS 双 Live Activity 正宗样式）：两岛之间露出桌面缝隙，
+             整组靠 StackPanel HorizontalAlignment=Center 一同水平居中——副岛出现/消失/主岛变宽
+             都会整组重新居中，保持「灵动岛顶部居中对称」。 -->
+        <StackPanel x:Name="IslandRow" Orientation="Horizontal"
+                    HorizontalAlignment="Center" VerticalAlignment="Top" Margin="0,18,0,0">
 
-            <!-- 背景+阴影层：squircle 连续曲率填充，随尺寸自动重算几何（阴影跟随轮廓） -->
-            <local:SquircleShape x:Name="BgShape" Radius="14">
-                <local:SquircleShape.Effect>
-                    <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.45" Color="#000000"/>
-                </local:SquircleShape.Effect>
-            </local:SquircleShape>
+            <!-- 主岛外层：圆角背景 + 阴影，不做裁剪 → 阴影跟随圆角。
+                 ZIndex 高于副岛：副岛吞并/分裂动画滑入主岛底下时被盖住 -->
+            <Grid x:Name="Pill"
+                  Width="84" Height="28"
+                  Panel.ZIndex="1"
+                  VerticalAlignment="Top"
+                  RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform>
+                    <ScaleTransform x:Name="PillScale" ScaleX="1" ScaleY="1"/>
+                </Grid.RenderTransform>
 
-            <!-- 裁剪层：Clip 在 SizeChanged 设为 squircle。内容是固定高度画布，Pill 高度收缩
-                 只裁剪可见区，标题行布局位置不随高度变化 → 收缩时圆点/文字不抖 -->
-            <Grid x:Name="ClipHost">
-                <Grid Height="300" VerticalAlignment="Top">
-                    <!-- 标题行：固定占顶部 28 高，内部圆点/文字垂直居中（= 横条态外观）。
-                         多会话时「主状态 ┊ 副点」整组靠 HorizontalAlignment=Center 一同居中（无外挂、无右挂拖尾）。-->
-                    <StackPanel x:Name="TitleRow" Orientation="Horizontal" Height="28"
-                                HorizontalAlignment="Center" VerticalAlignment="Top">
-                        <Ellipse x:Name="Dot" Width="9" Height="9"
-                                 Fill="#888A90" VerticalAlignment="Center"/>
-                        <TextBlock x:Name="Label" Text=""
-                                   Foreground="#F2F3F5" FontSize="13"
-                                   Margin="8,0,0,0"
-                                   VerticalAlignment="Center"
-                                   Opacity="0"
-                                   Visibility="Collapsed"
-                                   TextTrimming="CharacterEllipsis"/>
-                        <!-- 副会话点：收进药丸内部（标题行右段，squircle 裁剪区内），前置细竖分隔条把主状态与副会话分开。
-                             仅多会话由 C# RenderSatellites 填充并显示状态色点；hover 展开时整组淡出。 -->
-                        <Rectangle x:Name="SatSeparator" Width="1" Height="14"
-                                   Fill="#3AFFFFFF" Margin="9,0,0,0"
-                                   VerticalAlignment="Center" Visibility="Collapsed"/>
-                        <StackPanel x:Name="Satellites" Orientation="Horizontal"
-                                    Margin="8,0,0,0" VerticalAlignment="Center"/>
-                    </StackPanel>
+                <!-- 背景+阴影层：squircle 连续曲率填充，随尺寸自动重算几何（阴影跟随轮廓） -->
+                <local:SquircleShape x:Name="BgShape" Radius="14">
+                    <local:SquircleShape.Effect>
+                        <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.45" Color="#000000"/>
+                    </local:SquircleShape.Effect>
+                </local:SquircleShape>
 
-                    <!-- 详情面板：固定在标题下方，靠 Opacity 显隐（位置不动）。
-                         横条态时落在裁剪区外、不可见 -->
-                    <StackPanel x:Name="DetailPanel" VerticalAlignment="Top" Margin="0,32,0,0"
-                                HorizontalAlignment="Center" Opacity="0">
-                        <!-- 多会话切换行：每会话一个圆角标签（状态点 + 目录），点击切换显示哪个会话。
-                             仅多会话时由 C# 填充并显示；单会话整行隐藏。 -->
-                        <StackPanel x:Name="SessionTabs" Orientation="Horizontal"
-                                    HorizontalAlignment="Center" Margin="0,0,0,6"
-                                    Visibility="Collapsed"/>
-                        <!-- 任务清单组：浅色圆角背景块，进度行 + 多行清单，全部居中 -->
-                        <Border x:Name="TaskCard" Width="232" CornerRadius="10"
-                                Background="#1AFFFFFF" Padding="12,8">
-                            <StackPanel>
-                                <TextBlock x:Name="DetailProgress" Foreground="#EDEEF2" FontSize="12"
-                                           HorizontalAlignment="Center" TextAlignment="Center"
-                                           MaxWidth="208" TextTrimming="CharacterEllipsis"/>
-                                <!-- todo 清单：只铺开“在做 + 待办”，C# 在 RefreshDetail 动态填子 TextBlock（居中、各行省略） -->
-                                <StackPanel x:Name="TodoList" Margin="0,2,0,0"/>
-                            </StackPanel>
-                        </Border>
-                        <!-- 元信息组：目录 + 模型/强度/上下文，浅色圆角背景块，居中 -->
-                        <Border x:Name="MetaCard" Width="232" CornerRadius="10"
-                                Background="#1AFFFFFF" Padding="12,8" Margin="0,8,0,0">
-                            <StackPanel>
-                                <TextBlock x:Name="DetailCwd" Foreground="#C8CAD0" FontSize="11.5"
-                                           HorizontalAlignment="Center" TextAlignment="Center"
-                                           MaxWidth="208" TextTrimming="CharacterEllipsis"/>
-                                <TextBlock x:Name="DetailMeta" Foreground="#9A9CA4" FontSize="11.5"
-                                           Margin="0,4,0,0" HorizontalAlignment="Center" TextAlignment="Center"
-                                           MaxWidth="208" TextTrimming="CharacterEllipsis"/>
-                            </StackPanel>
-                        </Border>
-                    </StackPanel>
+                <!-- 裁剪层：Clip 在 SizeChanged 设为 squircle。内容是固定高度画布，Pill 高度收缩
+                     只裁剪可见区，标题行布局位置不随高度变化 → 收缩时圆点/文字不抖 -->
+                <Grid x:Name="ClipHost">
+                    <Grid Height="300" VerticalAlignment="Top">
+                        <!-- 标题行：固定占顶部 28 高，内部圆点/文字垂直居中（= 横条态外观）。
+                             副会话不在主岛内——由右侧独立 SatIsland 承载（分裂形态）。 -->
+                        <StackPanel x:Name="TitleRow" Orientation="Horizontal" Height="28"
+                                    HorizontalAlignment="Center" VerticalAlignment="Top">
+                            <Ellipse x:Name="Dot" Width="9" Height="9"
+                                     Fill="#888A90" VerticalAlignment="Center"/>
+                            <TextBlock x:Name="Label" Text=""
+                                       Foreground="#F2F3F5" FontSize="13"
+                                       Margin="8,0,0,0"
+                                       VerticalAlignment="Center"
+                                       Opacity="0"
+                                       Visibility="Collapsed"
+                                       TextTrimming="CharacterEllipsis"/>
+                        </StackPanel>
+
+                        <!-- 详情面板：固定在标题下方，靠 Opacity 显隐（位置不动）。
+                             横条态时落在裁剪区外、不可见 -->
+                        <StackPanel x:Name="DetailPanel" VerticalAlignment="Top" Margin="0,32,0,0"
+                                    HorizontalAlignment="Center" Opacity="0">
+                            <!-- 多会话切换行：每会话一个圆角标签（状态点 + 目录），点击切换显示哪个会话。
+                                 仅多会话时由 C# 填充并显示；单会话整行隐藏。 -->
+                            <StackPanel x:Name="SessionTabs" Orientation="Horizontal"
+                                        HorizontalAlignment="Center" Margin="0,0,0,6"
+                                        Visibility="Collapsed"/>
+                            <!-- 任务清单组：浅色圆角背景块，进度行 + 多行清单，全部居中 -->
+                            <Border x:Name="TaskCard" Width="232" CornerRadius="10"
+                                    Background="#1AFFFFFF" Padding="12,8">
+                                <StackPanel>
+                                    <TextBlock x:Name="DetailProgress" Foreground="#EDEEF2" FontSize="12"
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               MaxWidth="208" TextTrimming="CharacterEllipsis"/>
+                                    <!-- todo 清单：只铺开“在做 + 待办”，C# 在 RefreshDetail 动态填子 TextBlock（居中、各行省略） -->
+                                    <StackPanel x:Name="TodoList" Margin="0,2,0,0"/>
+                                </StackPanel>
+                            </Border>
+                            <!-- 元信息组：目录 + 模型/强度/上下文，浅色圆角背景块，居中 -->
+                            <Border x:Name="MetaCard" Width="232" CornerRadius="10"
+                                    Background="#1AFFFFFF" Padding="12,8" Margin="0,8,0,0">
+                                <StackPanel>
+                                    <TextBlock x:Name="DetailCwd" Foreground="#C8CAD0" FontSize="11.5"
+                                               HorizontalAlignment="Center" TextAlignment="Center"
+                                               MaxWidth="208" TextTrimming="CharacterEllipsis"/>
+                                    <TextBlock x:Name="DetailMeta" Foreground="#9A9CA4" FontSize="11.5"
+                                               Margin="0,4,0,0" HorizontalAlignment="Center" TextAlignment="Center"
+                                               MaxWidth="208" TextTrimming="CharacterEllipsis"/>
+                                </StackPanel>
+                            </Border>
+                        </StackPanel>
+                    </Grid>
                 </Grid>
+
+                <!-- 流光描边层:完成态绿色辉光弧绕 squircle 边缘循环(StrokeDashArray 原生动画)。
+                     最上层 + 不裁剪 → 绿色发光跟随轮廓溢出;平时 Collapsed/Data=null 零开销。 -->
+                <Path x:Name="GlowPath" Stretch="None" IsHitTestVisible="False"
+                      HorizontalAlignment="Left" VerticalAlignment="Top"
+                      Stroke="#3DD56B" StrokeThickness="2"
+                      StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeDashCap="Round"
+                      Visibility="Collapsed" Opacity="0">
+                    <Path.Effect>
+                        <DropShadowEffect Color="#3DD56B" BlurRadius="14" ShadowDepth="0" Opacity="0.9"/>
+                    </Path.Effect>
+                </Path>
             </Grid>
 
-            <!-- 流光描边层:完成态绿色辉光弧绕 squircle 边缘循环(StrokeDashArray 原生动画)。
-                 最上层 + 不裁剪 → 绿色发光跟随轮廓溢出;平时 Collapsed/Data=null 零开销。 -->
-            <Path x:Name="GlowPath" Stretch="None" IsHitTestVisible="False"
-                  HorizontalAlignment="Left" VerticalAlignment="Top"
-                  Stroke="#3DD56B" StrokeThickness="2"
-                  StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeDashCap="Round"
-                  Visibility="Collapsed" Opacity="0">
-                <Path.Effect>
-                    <DropShadowEffect Color="#3DD56B" BlurRadius="14" ShadowDepth="0" Opacity="0.9"/>
-                </Path.Effect>
-            </Path>
-        </Grid>
+            <!-- 副会话岛：独立小 squircle 岛（自带阴影），内部一颗/多颗 9px 状态色圆点代表其余活跃会话，
+                 超 MaxSatellites 折叠「+N」。仅多会话且未 hover 时显示；出现/消失由 C# 弹簧动画从主岛
+                 侧滑出/吸回（分裂/合并感）。宽度自适应点数（SatDots Margin 9.5 → 单点时 28×28 正圆）。 -->
+            <Grid x:Name="SatIsland" Height="28" Margin="8,0,0,0"
+                  VerticalAlignment="Top" Visibility="Collapsed" Opacity="0"
+                  RenderTransformOrigin="0.5,0.5">
+                <Grid.RenderTransform>
+                    <TransformGroup>
+                        <ScaleTransform x:Name="SatScale" ScaleX="1" ScaleY="1"/>
+                        <TranslateTransform x:Name="SatSlide" X="0"/>
+                    </TransformGroup>
+                </Grid.RenderTransform>
+                <local:SquircleShape x:Name="SatBg" Radius="14">
+                    <local:SquircleShape.Effect>
+                        <DropShadowEffect BlurRadius="18" ShadowDepth="0" Opacity="0.45" Color="#000000"/>
+                    </local:SquircleShape.Effect>
+                </local:SquircleShape>
+                <StackPanel x:Name="SatDots" Orientation="Horizontal"
+                            Margin="9.5,0" VerticalAlignment="Center"/>
+            </Grid>
+        </StackPanel>
     </Grid>
 </Window>

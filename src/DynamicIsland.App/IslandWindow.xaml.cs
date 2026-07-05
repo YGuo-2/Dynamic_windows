@@ -59,7 +59,7 @@ public partial class IslandWindow : Window
     private const double ToolHoldSeconds = 1.2;
 
     // —— 多会话生命周期（M3）——
-    private const int MaxSatellites = 3;          // 副会话点最多铺开数，超出折叠成「+N」（收进岛内，宜少）
+    private const int MaxSatellites = 3;          // 副岛内最多铺开点数，超出折叠成「+N」
     private const int MaxSessionTabs = 3;          // 详情卡会话切换行最多标签数，超出折叠成「+N」（详情卡宽 ~260）
 
     // —— 完成态流光：绿色辉光弧沿 squircle 边缘绕圈（StrokeDashArray 原生描边动画，渲染线程驱动，平时零开销）——
@@ -148,7 +148,7 @@ public partial class IslandWindow : Window
     private Session? _activeRendered;                       // 主药丸当前渲染的会话（PickActive 选出，脏检查用）
     private IslandStatus _renderedStatus = IslandStatus.Idle; // 主药丸渲染态（脏检查：会话/状态没变不重画）
     private string _renderedStatusText = "";                 // 主药丸渲染文字（同状态换工具名也要重画）
-    private double _renderedSatWidth = 0;                   // 上次渲染的副点区宽度（脏检查：副会话增减/变色也触发横条态重画）
+    private bool _satVisible;                               // 副会话岛当前是否显示（进出场动画的边沿检测）
     private Session? _displayed;                            // 详情卡当前显示的会话（hover 中 = pin 或主会话）
     private string? _pinnedKey;                             // 用户在详情卡锁定要看的 session_id；null = 跟随主会话
     private bool _hovering;
@@ -186,6 +186,7 @@ public partial class IslandWindow : Window
             _measure.FontFamily = Label.FontFamily;
             _measure.FontSize = Label.FontSize;
             BgShape.Fill = _bgBrush;
+            SatBg.Fill = _bgBrush; // 副岛与主岛同底色（hover 变亮时副岛正在淡出，同步变化更自然）
             ClipHost.SizeChanged += (_, _) => UpdateClip(PillRadius);
             // 流光仅在可见（完成态）时随 Pill 尺寸过渡跟随轮廓重画；平时不画，零开销
             BgShape.SizeChanged += (_, _) => { if (GlowPath.Visibility == Visibility.Visible) UpdateGlowGeometry(); };
@@ -325,7 +326,6 @@ public partial class IslandWindow : Window
     private void RenderActive()
     {
         var pick = PickActive();
-        double satW = SatelliteStripWidth();
         // 空闲时信息源接管：把接管源的内容纳入脏检查（换歌/电量变化也要重画）。
         var src = (pick == null || pick.Status == IslandStatus.Idle) ? ActiveInfoSource() : null;
         string ambGlyph = src?.Glyph ?? "";
@@ -334,19 +334,17 @@ public partial class IslandWindow : Window
         if (!ReferenceEquals(pick, _activeRendered)
             || (pick?.Status ?? IslandStatus.Idle) != _renderedStatus
             || statusText != _renderedStatusText
-            || satW != _renderedSatWidth
             || ambGlyph != _ambientGlyph
             || ambText != _ambientText)
         {
             _activeRendered = pick;
             _renderedStatus = pick?.Status ?? IslandStatus.Idle;
             _renderedStatusText = statusText;
-            _renderedSatWidth = satW;
             _ambientGlyph = ambGlyph;
             _ambientText = ambText;
-            RenderPill(pick); // _compactWidth 重算（含副点区）→ 横条态宽度对称跟随
+            RenderPill(pick);
         }
-        RenderSatellites();
+        RenderSatellites(); // 副岛每次全量重建（几颗点，廉价），数量/颜色变化即时反映
 
         if (_hovering)
         {
@@ -414,11 +412,10 @@ public partial class IslandWindow : Window
         // 空闲时信息源（M4）：有 ambient 内容则接管药丸显示，覆盖 idle 暗色外观
         bool ambient = status == IslandStatus.Idle && !string.IsNullOrEmpty(_ambientText);
         Dot.Fill = ambient ? AmbientBrush : ColorFor(status);
-        // 横条态宽度 = 主状态宽 + 副点区宽（分隔条 + 副点）。药丸 HorizontalAlignment=Center + 对称变宽 → 整组居中，无右挂。
-        _compactWidth = (status == IslandStatus.Idle && !ambient
+        // 主岛宽度只含自身内容；副会话由右侧独立 SatIsland 承载，整组由 IslandRow 居中。
+        _compactWidth = status == IslandStatus.Idle && !ambient
                             ? CompactWidth
-                            : MeasureWidth(ambient ? _ambientText : text, hasIcon: ambient && !string.IsNullOrEmpty(_ambientGlyph)))
-                        + SatelliteStripWidth();
+                            : MeasureWidth(ambient ? _ambientText : text, hasIcon: ambient && !string.IsNullOrEmpty(_ambientGlyph));
 
         if (!_hovering)
         {
@@ -470,11 +467,11 @@ public partial class IslandWindow : Window
         else StopGlow();
     }
 
-    // —— 副会话点（M3 重做）：除主会话外的活跃会话收进药丸内部（标题行右段，squircle 裁剪区内），
-    //    药丸对称变宽容纳它们 → 整组仍居中，无右挂拖尾。按状态色，超 MaxSatellites 折叠「+N」 ——
-    private const double SatelliteSize = 9;        // 与主圆点 Dot 同量级，不再是噪点
+    // —— 副会话岛（分裂形态）：除主会话外的活跃会话显示为右侧独立小岛 SatIsland 内的状态色圆点，
+    //    与主岛之间露桌面缝隙（iOS 双 Live Activity 的正宗分裂样式），整组由 IslandRow 一同居中。 ——
+    private const double SatelliteSize = 9;        // 与主圆点 Dot 同量级
     private const double SatelliteGap = 7;         // 副点之间间距
-    private const double SatSeparatorReserve = 18; // 分隔条占位（分隔条 Margin.Left 9 + Satellites Margin.Left 8 + 线宽 1）
+    private const double SatIslandGap = 8;         // 两岛桌面缝隙，与 XAML SatIsland Margin.Left 一致
     private static readonly Brush SatelliteOverflowBrush = MakeBrush(0x5A, 0x5C, 0x64); // 折叠点：暗灰
 
     // 当前应铺开的副会话（除主会话外的非 Idle），按优先级 + 最近活动排序。宽度估算与渲染共用，保证一致。
@@ -492,71 +489,144 @@ public partial class IslandWindow : Window
         return others;
     }
 
-    // 副点区在横条态占的额外宽度（分隔条 + n 颗点 + 颗间间距 + 可能的 +N 折叠点）。
-    // 计入 _compactWidth → 药丸对称变宽、整组居中。idle 态 / 无副点时为 0。
-    private double SatelliteStripWidth()
-    {
-        int total = ActiveSatellites().Count;
-        if (total == 0) return 0;
-        int dots = Math.Min(total, MaxSatellites) + (total > MaxSatellites ? 1 : 0);
-        return SatSeparatorReserve + dots * SatelliteSize + (dots - 1) * SatelliteGap;
-    }
-
     private void RenderSatellites()
     {
-        Satellites.Children.Clear();
-
         var others = ActiveSatellites();
-        if (others.Count == 0 || _hovering)
+        bool show = others.Count > 0 && !_hovering; // hover 展开时收起（详情卡 SessionTabs 接管）
+
+        if (!show)
         {
-            // 无副会话，或 hover 展开（详情卡 SessionTabs 接管）→ 整组隐藏
-            SatSeparator.Visibility = Visibility.Collapsed;
-            Satellites.Visibility = Visibility.Collapsed;
+            if (_satVisible) HideSatIsland();
             return;
         }
-        SatSeparator.Visibility = Visibility.Visible;
-        Satellites.Visibility = Visibility.Visible;
+
+        // 重建前清掉旧点上的 Forever 呼吸动画，防孤儿动画驻留计时系统
+        foreach (UIElement c in SatDots.Children) c.BeginAnimation(OpacityProperty, null);
+        SatDots.Children.Clear();
 
         int shown = Math.Min(others.Count, MaxSatellites);
-        for (int i = 0; i < shown; i++) Satellites.Children.Add(MakeSatelliteDot(others[i]));
+        for (int i = 0; i < shown; i++) SatDots.Children.Add(MakeSatelliteDot(others[i], first: i == 0));
         int rest = others.Count - shown;
-        if (rest > 0) Satellites.Children.Add(MakeOverflowDot(rest));
+        if (rest > 0) SatDots.Children.Add(MakeOverflowDot(rest));
+
+        if (!_satVisible) ShowSatIsland();
     }
 
-    private Ellipse MakeSatelliteDot(Session s)
+    // 副岛出场：布局宽度从 0 长开 + 从主岛底下弹簧滑出（「分裂」）。
+    // 宽度/边距参与动画 → StackPanel 全程连续重居中，主岛无瞬间跳位；
+    // 打断收起时（fresh=false）从当前宽度/位置顺滑接管。
+    private void ShowSatIsland()
+    {
+        _satVisible = true;
+        bool fresh = SatIsland.Visibility != Visibility.Visible;
+        double fromW = fresh ? 0 : SatIsland.ActualWidth;
+
+        // 清宽度/边距动画恢复 auto，量当前点集的自然宽度作为动画终点
+        SatIsland.BeginAnimation(WidthProperty, null);
+        SatIsland.BeginAnimation(MarginProperty, null);
+        SatIsland.Visibility = Visibility.Visible;
+        SatIsland.UpdateLayout();
+        double natW = SatIsland.ActualWidth;
+
+        if (fresh)
+        {
+            SatIsland.Opacity = 0;
+            SatSlide.BeginAnimation(TranslateTransform.XProperty, null);
+            SatSlide.X = -(natW + SatIslandGap); // 从主岛底下起步
+            SatScale.BeginAnimation(ScaleTransform.ScaleXProperty, null);
+            SatScale.BeginAnimation(ScaleTransform.ScaleYProperty, null);
+            SatScale.ScaleX = SatScale.ScaleY = 0.6;
+        }
+
+        var spring = new SpringEase { EasingMode = EasingMode.EaseIn, DurationSeconds = 0.42, Response = 0.22, DampingFraction = 0.72 };
+        var wAnim = new DoubleAnimation(fromW, natW, TimeSpan.FromSeconds(0.42)) { EasingFunction = spring };
+        wAnim.Completed += (_, _) =>
+        {
+            if (!_satVisible) return;
+            // 结束回 auto 宽度，之后点数增减由布局自适应
+            SatIsland.BeginAnimation(WidthProperty, null);
+            SatIsland.BeginAnimation(MarginProperty, null);
+        };
+        SatIsland.BeginAnimation(WidthProperty, wAnim);
+        SatIsland.BeginAnimation(MarginProperty,
+            new ThicknessAnimation(new Thickness(SatIslandGap, 0, 0, 0), TimeSpan.FromSeconds(0.42)) { EasingFunction = spring });
+        SatIsland.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, TimeSpan.FromSeconds(0.22)));
+        SatSlide.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(0, TimeSpan.FromSeconds(0.42)) { EasingFunction = spring });
+        SatScale.BeginAnimation(ScaleTransform.ScaleXProperty,
+            new DoubleAnimation(1.0, TimeSpan.FromSeconds(0.42)) { EasingFunction = spring });
+        SatScale.BeginAnimation(ScaleTransform.ScaleYProperty,
+            new DoubleAnimation(1.0, TimeSpan.FromSeconds(0.42)) { EasingFunction = spring });
+    }
+
+    // 副岛退场：布局宽度收 0（主岛全程连续重居中，消掉「Collapsed 瞬间跳位」）+
+    // 整岛滑入主岛底下（Pill ZIndex 在上）+ 缩小淡出。hover 展开时正好被长大的
+    // 详情卡边缘盖过 =「吞并」；非 hover（副会话清零）则是「合并回主岛」。
+    private void HideSatIsland()
+    {
+        _satVisible = false;
+        double satW = SatIsland.ActualWidth;
+        var ease = new SpringEase { EasingMode = EasingMode.EaseIn, DurationSeconds = 0.34, Response = 0.18, DampingFraction = 1.0 };
+        var fade = new DoubleAnimation(0.0, TimeSpan.FromSeconds(0.30));
+        fade.Completed += (_, _) =>
+        {
+            if (_satVisible) return; // 期间被重新显示则放弃收起
+            SatIsland.Visibility = Visibility.Collapsed;
+            SatIsland.BeginAnimation(WidthProperty, null);   // 回 auto，供下次出场量自然宽
+            SatIsland.BeginAnimation(MarginProperty, null);
+        };
+        SatIsland.BeginAnimation(OpacityProperty, fade);
+        SatIsland.BeginAnimation(WidthProperty,
+            new DoubleAnimation(satW, 0, TimeSpan.FromSeconds(0.34)) { EasingFunction = ease });
+        SatIsland.BeginAnimation(MarginProperty,
+            new ThicknessAnimation(new Thickness(0), TimeSpan.FromSeconds(0.34)) { EasingFunction = ease });
+        SatSlide.BeginAnimation(TranslateTransform.XProperty,
+            new DoubleAnimation(-(satW + SatIslandGap), TimeSpan.FromSeconds(0.34)) { EasingFunction = ease });
+        SatScale.BeginAnimation(ScaleTransform.ScaleXProperty,
+            new DoubleAnimation(0.55, TimeSpan.FromSeconds(0.34)) { EasingFunction = ease });
+        SatScale.BeginAnimation(ScaleTransform.ScaleYProperty,
+            new DoubleAnimation(0.55, TimeSpan.FromSeconds(0.34)) { EasingFunction = ease });
+    }
+
+    private Ellipse MakeSatelliteDot(Session s, bool first)
     {
         var dot = new Ellipse
         {
             Width = SatelliteSize,
             Height = SatelliteSize,
             Fill = ColorFor(s.Status),
-            Margin = new Thickness(0, 0, SatelliteGap, 0),
+            Margin = new Thickness(first ? 0 : SatelliteGap, 0, 0, 0),
             VerticalAlignment = VerticalAlignment.Center,
-            Cursor = Cursors.Hand,
-            Tag = s.Key,
             ToolTip = ShortCwd(s.Cwd)
         };
-        // 点副点：hover 中联动切详情卡显示该会话（pin）
-        dot.MouseLeftButtonUp += (sender, _) =>
+        // 等待批准的副会话：呼吸脉冲吸引注意（另一个会话在等你，而主岛被同权重更近的会话占着）
+        if (s.Status == IslandStatus.WaitingApproval)
         {
-            if (_hovering && sender is Ellipse e && e.Tag is string key) PinSession(key);
-        };
+            dot.BeginAnimation(OpacityProperty, new DoubleAnimation(1.0, 0.25, TimeSpan.FromSeconds(0.55))
+            {
+                AutoReverse = true,
+                RepeatBehavior = RepeatBehavior.Forever,
+                EasingFunction = new SineEase { EasingMode = EasingMode.EaseInOut }
+            });
+        }
         return dot;
     }
 
     private Border MakeOverflowDot(int rest) => new()
     {
-        Width = SatelliteSize + 5,
-        Height = SatelliteSize,
-        CornerRadius = new CornerRadius(SatelliteSize / 2),
+        Height = SatelliteSize + 2,
+        MinWidth = SatelliteSize + 7,
+        CornerRadius = new CornerRadius((SatelliteSize + 2) / 2),
         Background = SatelliteOverflowBrush,
+        Padding = new Thickness(3, 0, 3, 0),
+        Margin = new Thickness(SatelliteGap, 0, 0, 0),
         VerticalAlignment = VerticalAlignment.Center,
         ToolTip = $"还有 {rest} 个会话",
         Child = new TextBlock
         {
             Text = $"+{rest}",
             Foreground = Brushes.White,
-            FontSize = 7,
+            FontSize = 8,
             HorizontalAlignment = HorizontalAlignment.Center,
             VerticalAlignment = VerticalAlignment.Center
         }
@@ -711,7 +781,7 @@ public partial class IslandWindow : Window
     {
         _hovering = true;
         StopPillPulse();
-        RenderSatellites(); // 收进药丸的副点在展开态会挤偏居中标题 → 整组收起（_hovering 判定），详情卡 SessionTabs 接管
+        RenderSatellites(); // hover 展开：副岛淡出吸回（_hovering 判定），详情卡 SessionTabs 接管
 
         // 进入详情卡：未 pin → 显示当前主会话
         _pinnedKey = null;
@@ -743,8 +813,7 @@ public partial class IslandWindow : Window
         _hovering = false;
         _hoverTimer.Stop();
         _pinnedKey = null; // 离开取消 pin，下次 hover 回自动跟随主会话
-        Satellites.Opacity = 1.0;
-        RenderSatellites(); // 回横条态：副点重新铺回药丸内部
+        RenderSatellites(); // 回横条态：副岛弹簧滑出复位
 
         BeginDouble(DetailPanel, OpacityProperty, 0.0, 0.23);
 
