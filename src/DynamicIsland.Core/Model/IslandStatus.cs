@@ -7,5 +7,6 @@ public enum IslandStatus
     Thinking,        // 思考中：呼吸光点
     RunningTool,     // 执行工具：显示工具名
     WaitingApproval, // 等待批准：高亮提醒
-    Done             // 完成：✓，数秒后回 Idle
+    Done,            // 完成：✓，数秒后回 Idle
+    Ambient          // 非 agent 信息源（媒体/电池）在空闲时接管药丸显示；不参与 agent 优先级权重
 }
