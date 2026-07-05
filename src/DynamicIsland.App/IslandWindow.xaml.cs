@@ -132,6 +132,7 @@ public partial class IslandWindow : Window
         public long LastTranscriptLen = -1; // 上次成功读取 usage 时的文件长度；失败不推进，避免错过最终读数
         public TranscriptReader.TaskSnapshotCursor TaskCursor = new();
         public bool TranscriptReadInFlight;
+        public DateTime? ToolHoldDue;
 
         public DateTime LastActivity { get => Agent.LastActivity; set => Agent.LastActivity = value; }
         public string Tool { get => Agent.Tool; set => Agent.Tool = value; }
@@ -146,9 +147,9 @@ public partial class IslandWindow : Window
     // —— 多会话渲染状态（M3）——
     private Session? _activeRendered;                       // 主药丸当前渲染的会话（PickActive 选出，脏检查用）
     private IslandStatus _renderedStatus = IslandStatus.Idle; // 主药丸渲染态（脏检查：会话/状态没变不重画）
+    private string _renderedStatusText = "";                 // 主药丸渲染文字（同状态换工具名也要重画）
     private double _renderedSatWidth = 0;                   // 上次渲染的副点区宽度（脏检查：副会话增减/变色也触发横条态重画）
     private Session? _displayed;                            // 详情卡当前显示的会话（hover 中 = pin 或主会话）
-    private Session? _toolHoldTarget;                       // _toolHoldTimer 武装时的目标会话（只对它回落）
     private string? _pinnedKey;                             // 用户在详情卡锁定要看的 session_id；null = 跟随主会话
     private bool _hovering;
     private double _glowUnit; // 周长 / 线宽 = StrokeDashArray 与 StrokeDashOffset 的单位；StartGlow 时缓存供 offset 动画
@@ -167,17 +168,12 @@ public partial class IslandWindow : Window
         // 文件没变直接跳过，不会真的每秒全量读 8MB；读到新数据自行 RefreshDetail。只拉当前展示的会话。
         _hoverTimer.Tick += (_, _) => { if (_hovering && _displayed != null) LoadTranscriptAsync(_displayed); };
 
-        // 工具名延迟回落：Tick 到点若目标会话仍是主会话且停在某工具（没被新事件改写），才回「思考中」
+        // 工具名延迟回落：每个会话各自有到期时间；一个 UI timer 扫描所有到期项，避免多会话互相覆盖。
         _toolHoldTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(ToolHoldSeconds) };
         _toolHoldTimer.Tick += (_, _) =>
         {
             _toolHoldTimer.Stop();
-            var t = _toolHoldTarget;
-            _toolHoldTarget = null;
-            if (t != null && AgentSessionStateMachine.ApplyToolHoldElapsed(t.Agent))
-            {
-                RenderActive();
-            }
+            ApplyDueToolHolds(DateTime.Now);
         };
 
         // 多会话生命周期：每 2s 扫一遍——Done 超 DoneLingerSeconds 回落 Idle、Idle 超 IdleEvictSeconds 移除。
@@ -218,17 +214,13 @@ public partial class IslandWindow : Window
         if (evt.Todos is { Count: > 0 }) s.Todos = evt.Todos; // 仅非空覆盖：旧清单在后续非 TodoWrite 事件中保留
 
         // 只取消同一会话的待回落；多会话下 B 的事件不能误取消 A 的 tool-hold。
-        if (ReferenceEquals(s, _toolHoldTarget))
-        {
-            _toolHoldTimer.Stop();
-            _toolHoldTarget = null;
-        }
+        CancelToolHold(s);
 
-        var eventResult = AgentSessionStateMachine.ApplyEvent(s.Agent, evt, DateTime.Now);
+        var now = DateTime.Now;
+        var eventResult = AgentSessionStateMachine.ApplyEvent(s.Agent, evt, now);
         if (eventResult.ArmToolHold)
         {
-            _toolHoldTarget = s;
-            _toolHoldTimer.Start();
+            ArmToolHold(s, now);
         }
 
         RenderActive();
@@ -241,6 +233,56 @@ public partial class IslandWindow : Window
             RefreshDetail();
             AnimatePill(DetailWidth, DetailTargetHeight(), 0.29);
         }
+    }
+
+    private void ArmToolHold(Session s, DateTime now)
+    {
+        s.ToolHoldDue = now + TimeSpan.FromSeconds(ToolHoldSeconds);
+        ScheduleToolHoldTimer(now);
+    }
+
+    private void CancelToolHold(Session s)
+    {
+        if (s.ToolHoldDue == null) return;
+        s.ToolHoldDue = null;
+        ScheduleToolHoldTimer(DateTime.Now);
+    }
+
+    private void ApplyDueToolHolds(DateTime now)
+    {
+        var changed = false;
+        foreach (var s in _sessions.Values)
+        {
+            if (s.ToolHoldDue is not { } due || due > now) continue;
+            s.ToolHoldDue = null;
+            changed |= AgentSessionStateMachine.ApplyToolHoldElapsed(s.Agent);
+        }
+
+        if (changed) RenderActive();
+        ScheduleToolHoldTimer(now);
+    }
+
+    private void ScheduleToolHoldTimer(DateTime now)
+    {
+        DateTime? nextDue = null;
+        foreach (var s in _sessions.Values)
+        {
+            if (s.ToolHoldDue == null) continue;
+            if (nextDue == null || s.ToolHoldDue < nextDue) nextDue = s.ToolHoldDue;
+        }
+
+        if (nextDue == null)
+        {
+            _toolHoldTimer.Stop();
+            return;
+        }
+
+        var delay = nextDue.Value - now;
+        if (delay < TimeSpan.FromMilliseconds(1))
+            delay = TimeSpan.FromMilliseconds(1);
+        _toolHoldTimer.Interval = delay;
+        _toolHoldTimer.Stop();
+        _toolHoldTimer.Start();
     }
 
     // —— 优先级选主：WaitingApproval > RunningTool > Thinking > Done > Idle，同权重取最近活动 ——
@@ -287,14 +329,17 @@ public partial class IslandWindow : Window
         var src = (pick == null || pick.Status == IslandStatus.Idle) ? ActiveInfoSource() : null;
         string ambGlyph = src?.Glyph ?? "";
         string ambText = src?.Label ?? "";
+        string statusText = pick?.StatusText ?? "";
         if (!ReferenceEquals(pick, _activeRendered)
             || (pick?.Status ?? IslandStatus.Idle) != _renderedStatus
+            || statusText != _renderedStatusText
             || satW != _renderedSatWidth
             || ambGlyph != _ambientGlyph
             || ambText != _ambientText)
         {
             _activeRendered = pick;
             _renderedStatus = pick?.Status ?? IslandStatus.Idle;
+            _renderedStatusText = statusText;
             _renderedSatWidth = satW;
             _ambientGlyph = ambGlyph;
             _ambientText = ambText;
@@ -323,11 +368,8 @@ public partial class IslandWindow : Window
             if (result.Changed)
             {
                 changed = true;
-                if (ReferenceEquals(s, _toolHoldTarget) && s.Status != IslandStatus.RunningTool)
-                {
-                    _toolHoldTimer.Stop();
-                    _toolHoldTarget = null;
-                }
+                if (s.Status != IslandStatus.RunningTool)
+                    s.ToolHoldDue = null;
             }
             if (result.Remove)
             {
@@ -339,6 +381,7 @@ public partial class IslandWindow : Window
 
         if (changed)
         {
+            ScheduleToolHoldTimer(now);
             RenderActive();
             // 全空 / 全 Idle 时把堆与工作集还给 OS
             bool allIdle = true;
@@ -704,13 +747,20 @@ public partial class IslandWindow : Window
 
         BeginDouble(DetailPanel, OpacityProperty, 0.0, 0.23);
 
-        double targetW = _current == IslandStatus.Idle ? CompactWidth : _compactWidth;
+        bool ambient = _current == IslandStatus.Idle && !string.IsNullOrEmpty(_ambientText);
+        double targetW = _current == IslandStatus.Idle && !ambient ? CompactWidth : _compactWidth;
         AnimatePill(targetW, PillCompactHeight, 0.36, expanding: false);
         AnimateRadius(14, 0.36);
 
-        if (_current == IslandStatus.Idle)
+        if (_current == IslandStatus.Idle && !ambient)
         {
             AnimateLabelOpacity(0.0, clearWhenDone: true);
+        }
+        else if (ambient)
+        {
+            Label.Visibility = Visibility.Visible;
+            SetAmbientLabel(_ambientGlyph, _ambientText);
+            AnimateLabelOpacity(1.0);
         }
         else
         {

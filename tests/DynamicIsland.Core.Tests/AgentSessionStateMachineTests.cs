@@ -78,6 +78,20 @@ public class AgentSessionStateMachineTests
         Assert.Equal(IslandStatus.Thinking, a.Status);
     }
 
+    [Fact]
+    public void ConsecutiveToolEventsUpdateRunningToolText()
+    {
+        var state = new AgentSessionState();
+        var now = new DateTime(2026, 6, 22, 12, 0, 0);
+
+        AgentSessionStateMachine.ApplyEvent(state, Event("PreToolUse", tool: "Bash"), now);
+        AgentSessionStateMachine.ApplyEvent(state, Event("PreToolUse", tool: "Read"), now.AddMilliseconds(100));
+
+        Assert.Equal(IslandStatus.RunningTool, state.Status);
+        Assert.Equal("Read", state.Tool);
+        Assert.Equal("Read", state.StatusText);
+    }
+
     [Theory]
     [InlineData(IslandStatus.Thinking)]
     [InlineData(IslandStatus.RunningTool)]
