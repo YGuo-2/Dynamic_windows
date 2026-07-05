@@ -79,6 +79,44 @@ public class AgentSessionStateMachineTests
     }
 
     [Fact]
+    public void PassiveNotificationDoesNotCancelPendingToolHold()
+    {
+        var state = new AgentSessionState();
+        var now = new DateTime(2026, 6, 22, 12, 0, 0);
+
+        AgentSessionStateMachine.ApplyEvent(state, Event("UserPromptSubmit"), now);
+        AgentSessionStateMachine.ApplyEvent(state, Event("PreToolUse", tool: "Bash"), now.AddMilliseconds(100));
+        var post = AgentSessionStateMachine.ApplyEvent(state, Event("PostToolUse", tool: "Bash"), now.AddMilliseconds(200));
+        var notification = AgentSessionStateMachine.ApplyEvent(
+            state,
+            Event("Notification", message: "Claude is waiting for your input"),
+            now.AddMilliseconds(300));
+
+        Assert.True(post.ArmToolHold);
+        Assert.False(notification.CancelToolHold);
+        Assert.Equal(IslandStatus.RunningTool, state.Status);
+    }
+
+    [Fact]
+    public void ApprovalNotificationCancelsPendingToolHold()
+    {
+        var state = new AgentSessionState();
+        var now = new DateTime(2026, 6, 22, 12, 0, 0);
+
+        AgentSessionStateMachine.ApplyEvent(state, Event("UserPromptSubmit"), now);
+        AgentSessionStateMachine.ApplyEvent(state, Event("PreToolUse", tool: "Bash"), now.AddMilliseconds(100));
+        var post = AgentSessionStateMachine.ApplyEvent(state, Event("PostToolUse", tool: "Bash"), now.AddMilliseconds(200));
+        var notification = AgentSessionStateMachine.ApplyEvent(
+            state,
+            Event("Notification", message: "Claude needs your permission to use Bash"),
+            now.AddMilliseconds(300));
+
+        Assert.True(post.ArmToolHold);
+        Assert.True(notification.CancelToolHold);
+        Assert.Equal(IslandStatus.WaitingApproval, state.Status);
+    }
+
+    [Fact]
     public void ConsecutiveToolEventsUpdateRunningToolText()
     {
         var state = new AgentSessionState();

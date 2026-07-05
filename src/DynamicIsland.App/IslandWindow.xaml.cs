@@ -213,11 +213,12 @@ public partial class IslandWindow : Window
         if (!string.IsNullOrEmpty(evt.CurrentTask)) s.CurrentTask = evt.CurrentTask!;
         if (evt.Todos is { Count: > 0 }) s.Todos = evt.Todos; // 仅非空覆盖：旧清单在后续非 TodoWrite 事件中保留
 
-        // 只取消同一会话的待回落；多会话下 B 的事件不能误取消 A 的 tool-hold。
-        CancelToolHold(s);
-
         var now = DateTime.Now;
         var eventResult = AgentSessionStateMachine.ApplyEvent(s.Agent, evt, now);
+        if (eventResult.CancelToolHold)
+        {
+            CancelToolHold(s, now);
+        }
         if (eventResult.ArmToolHold)
         {
             ArmToolHold(s, now);
@@ -241,11 +242,11 @@ public partial class IslandWindow : Window
         ScheduleToolHoldTimer(now);
     }
 
-    private void CancelToolHold(Session s)
+    private void CancelToolHold(Session s, DateTime now)
     {
         if (s.ToolHoldDue == null) return;
         s.ToolHoldDue = null;
-        ScheduleToolHoldTimer(DateTime.Now);
+        ScheduleToolHoldTimer(now);
     }
 
     private void ApplyDueToolHolds(DateTime now)

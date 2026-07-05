@@ -14,7 +14,7 @@ public sealed class AgentSessionState
     public bool TurnRunning { get; set; }
 }
 
-public readonly record struct SessionEventResult(bool ArmToolHold);
+public readonly record struct SessionEventResult(bool ArmToolHold, bool CancelToolHold);
 
 public readonly record struct PruneResult(bool Changed, bool Remove);
 
@@ -36,7 +36,7 @@ public static class AgentSessionStateMachine
                 state.TurnRunning = true;
                 state.Tool = "";
                 ApplyStatus(state, IslandStatus.Thinking, "思考中…");
-                break;
+                return new SessionEventResult(ArmToolHold: false, CancelToolHold: true);
 
             case "PreToolUse":
                 if (string.Equals(evt.Tool, "TodoWrite", StringComparison.OrdinalIgnoreCase))
@@ -48,14 +48,17 @@ public static class AgentSessionStateMachine
                     state.Tool = evt.Tool ?? "工具";
                     ApplyStatus(state, IslandStatus.RunningTool, state.Tool);
                 }
-                break;
+                return new SessionEventResult(ArmToolHold: false, CancelToolHold: true);
 
             case "PostToolUse":
-                return new SessionEventResult(ArmToolHold: state.Status == IslandStatus.RunningTool);
+                return new SessionEventResult(ArmToolHold: state.Status == IslandStatus.RunningTool, CancelToolHold: false);
 
             case "Notification":
                 if (IsApprovalRequest(evt.Message) && state.TurnRunning)
+                {
                     ApplyStatus(state, IslandStatus.WaitingApproval, "等待批准");
+                    return new SessionEventResult(ArmToolHold: false, CancelToolHold: true);
+                }
                 break;
 
             case "Stop":
@@ -65,10 +68,10 @@ public static class AgentSessionStateMachine
                     state.TurnRunning = false;
                 }
                 ApplyStatus(state, IslandStatus.Done, "完成");
-                break;
+                return new SessionEventResult(ArmToolHold: false, CancelToolHold: true);
         }
 
-        return new SessionEventResult(ArmToolHold: false);
+        return new SessionEventResult(ArmToolHold: false, CancelToolHold: false);
     }
 
     public static bool ApplyToolHoldElapsed(AgentSessionState state)
