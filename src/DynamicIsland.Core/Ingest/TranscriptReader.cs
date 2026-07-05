@@ -1,4 +1,5 @@
 using System.IO;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using DynamicIsland.Core.Model;
@@ -26,11 +27,52 @@ public static class TranscriptReader
     /// <summary>Task 系统清单快照；HasTaskHistory 用于区分“无任务”和“旧 TodoWrite 会话”。</summary>
     public readonly record struct TaskSnapshot(IReadOnlyList<TodoItem> Todos, bool HasTaskHistory);
 
+    public sealed class TaskSnapshotCursor
+    {
+        internal long _offset;
+        internal readonly Dictionary<string, ToolUse> _uses = new();
+        internal readonly Dictionary<string, TodoItem> _tasks = new();
+        internal readonly List<string> _order = new();
+        internal bool _hasTaskHistory;
+
+        public long Offset => _offset;
+
+        internal TaskSnapshotCursor Clone()
+        {
+            var copy = new TaskSnapshotCursor
+            {
+                _offset = _offset,
+                _hasTaskHistory = _hasTaskHistory
+            };
+            foreach (var item in _uses)
+                copy._uses[item.Key] = new ToolUse(item.Value.Name, item.Value.Input.Clone());
+            foreach (var item in _tasks)
+                copy._tasks[item.Key] = item.Value;
+            copy._order.AddRange(_order);
+            return copy;
+        }
+
+        internal void Reset()
+        {
+            _offset = 0;
+            _uses.Clear();
+            _tasks.Clear();
+            _order.Clear();
+            _hasTaskHistory = false;
+        }
+    }
+
+    public readonly record struct TaskSnapshotReadResult(
+        IReadOnlyList<TodoItem> Todos,
+        bool HasTaskHistory,
+        TaskSnapshotCursor Cursor,
+        bool FileChanged);
+
     // 尾部回读窗口：足以覆盖最后若干条记录（单条 assistant 记录通常远小于此）。
     private const int TailBytes = 256 * 1024;
     private static readonly Regex TaskIdRegex = new(@"#(\d+)", RegexOptions.Compiled);
 
-    private readonly record struct ToolUse(string Name, JsonElement Input);
+    internal readonly record struct ToolUse(string Name, JsonElement Input);
 
     /// <summary>读末尾最近一条带 usage 的 assistant 记录；任何失败都返回 null（绝不抛）。</summary>
     public static Snapshot? ReadLatest(string path)
@@ -61,59 +103,113 @@ public static class TranscriptReader
 
     public static TaskSnapshot ReadTaskSnapshot(string path)
     {
+        var result = ReadTaskSnapshotIncremental(path, cursor: null);
+        return new TaskSnapshot(result.Todos, result.HasTaskHistory);
+    }
+
+    public static TaskSnapshotReadResult ReadTaskSnapshotIncremental(string path, TaskSnapshotCursor? cursor)
+    {
+        var next = cursor?.Clone() ?? new TaskSnapshotCursor();
         try
         {
             if (string.IsNullOrEmpty(path) || !File.Exists(path))
-                return new TaskSnapshot(Array.Empty<TodoItem>(), HasTaskHistory: false);
-
-            var uses = new Dictionary<string, ToolUse>();
-            var tasks = new Dictionary<string, TodoItem>();
-            var order = new List<string>();
-            var hasTaskHistory = false;
+                return EmptyTaskReadResult();
 
             using var fs = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var sr = new StreamReader(fs);
-            while (sr.ReadLine() is { } line)
-            {
-                line = line.Trim();
-                if (line.Length == 0 || line[0] != '{') continue;
-                try
-                {
-                    using var doc = JsonDocument.Parse(line);
-                    if (!TryGetContentBlocks(doc.RootElement, out var blocks)) continue;
+            if (fs.Length < next._offset)
+                next.Reset();
 
-                    foreach (var block in blocks.EnumerateArray())
-                    {
-                        if (block.ValueKind != JsonValueKind.Object) continue;
-                        if (!block.TryGetProperty("type", out var typeEl)) continue;
-                        var type = typeEl.GetString();
+            if (fs.Length == next._offset)
+                return ToTaskReadResult(next, fileChanged: false);
 
-                        if (type == "tool_use")
-                        {
-                            hasTaskHistory |= TrackToolUse(block, uses, tasks);
-                        }
-                        else if (type == "tool_result")
-                        {
-                            hasTaskHistory |= ApplyTaskCreateResult(block, uses, tasks, order);
-                        }
-                    }
-                }
-                catch (JsonException)
-                {
-                    // Transcript may be written concurrently; skip incomplete/bad lines.
-                }
-            }
+            var count = checked((int)(fs.Length - next._offset));
+            var bytes = new byte[count];
+            fs.Seek(next._offset, SeekOrigin.Begin);
+            fs.ReadExactly(bytes);
 
-            var result = new List<TodoItem>();
-            foreach (var taskId in order)
-            {
-                if (tasks.TryGetValue(taskId, out var task)) result.Add(task);
-            }
-            return new TaskSnapshot(result, hasTaskHistory);
+            var consumed = ApplyTaskBytes(bytes, next);
+            if (consumed > 0)
+                next._offset += consumed;
+
+            return ToTaskReadResult(next, fileChanged: consumed > 0);
         }
         catch
         {
-            return new TaskSnapshot(Array.Empty<TodoItem>(), HasTaskHistory: false);
+            return ToTaskReadResult(next, fileChanged: false);
+        }
+    }
+
+    private static TaskSnapshotReadResult EmptyTaskReadResult()
+    {
+        var empty = new TaskSnapshotCursor();
+        return ToTaskReadResult(empty, fileChanged: false);
+    }
+
+    private static TaskSnapshotReadResult ToTaskReadResult(TaskSnapshotCursor cursor, bool fileChanged)
+    {
+        var result = new List<TodoItem>();
+        foreach (var taskId in cursor._order)
+        {
+            if (cursor._tasks.TryGetValue(taskId, out var task)) result.Add(task);
+        }
+        return new TaskSnapshotReadResult(result, cursor._hasTaskHistory, cursor, fileChanged);
+    }
+
+    private static int ApplyTaskBytes(byte[] bytes, TaskSnapshotCursor cursor)
+    {
+        var consumed = 0;
+        var lineStart = 0;
+        for (var i = 0; i < bytes.Length; i++)
+        {
+            if (bytes[i] != (byte)'\n') continue;
+
+            var lineLength = i - lineStart;
+            if (lineLength > 0 && bytes[i - 1] == (byte)'\r')
+                lineLength--;
+            var line = Encoding.UTF8.GetString(bytes, lineStart, lineLength).Trim();
+            TryApplyTaskLine(line, cursor, consumeMalformed: true);
+            consumed = i + 1;
+            lineStart = i + 1;
+        }
+
+        if (lineStart < bytes.Length)
+        {
+            var line = Encoding.UTF8.GetString(bytes, lineStart, bytes.Length - lineStart).Trim();
+            if (TryApplyTaskLine(line, cursor, consumeMalformed: false))
+                consumed = bytes.Length;
+        }
+
+        return consumed;
+    }
+
+    private static bool TryApplyTaskLine(string line, TaskSnapshotCursor cursor, bool consumeMalformed)
+    {
+        if (line.Length == 0 || line[0] != '{') return true;
+        try
+        {
+            using var doc = JsonDocument.Parse(line);
+            if (!TryGetContentBlocks(doc.RootElement, out var blocks)) return true;
+
+            foreach (var block in blocks.EnumerateArray())
+            {
+                if (block.ValueKind != JsonValueKind.Object) continue;
+                if (!block.TryGetProperty("type", out var typeEl)) continue;
+                var type = typeEl.GetString();
+
+                if (type == "tool_use")
+                {
+                    cursor._hasTaskHistory |= TrackToolUse(block, cursor._uses, cursor._tasks);
+                }
+                else if (type == "tool_result")
+                {
+                    cursor._hasTaskHistory |= ApplyTaskCreateResult(block, cursor._uses, cursor._tasks, cursor._order);
+                }
+            }
+            return true;
+        }
+        catch (JsonException)
+        {
+            return consumeMalformed;
         }
     }
 

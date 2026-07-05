@@ -12,6 +12,15 @@ using System.Windows.Shapes;
 using System.Windows.Threading;
 using DynamicIsland.Core.Ingest;
 using DynamicIsland.Core.Model;
+using DynamicIsland.Core.State;
+using Brush = System.Windows.Media.Brush;
+using Brushes = System.Windows.Media.Brushes;
+using Color = System.Windows.Media.Color;
+using Cursors = System.Windows.Input.Cursors;
+using FontFamily = System.Windows.Media.FontFamily;
+using HorizontalAlignment = System.Windows.HorizontalAlignment;
+using Orientation = System.Windows.Controls.Orientation;
+using Size = System.Windows.Size;
 
 namespace DynamicIsland.App;
 
@@ -50,8 +59,6 @@ public partial class IslandWindow : Window
     private const double ToolHoldSeconds = 1.2;
 
     // —— 多会话生命周期（M3）——
-    private const double DoneLingerSeconds = 6;   // 完成态保留多久后数据回落 Idle（替代旧单例 _doneTimer 的 4s）
-    private const double IdleEvictSeconds = 30;   // Idle 多久后从 _sessions 移除，防字典无限增长
     private const int MaxSatellites = 3;          // 副会话点最多铺开数，超出折叠成「+N」（收进岛内，宜少）
     private const int MaxSessionTabs = 3;          // 详情卡会话切换行最多标签数，超出折叠成「+N」（详情卡宽 ~260）
 
@@ -70,6 +77,7 @@ public partial class IslandWindow : Window
     private static readonly Brush ToolBrush     = MakeBrush(0x2E, 0xC5, 0xCE); // 青
     private static readonly Brush WaitBrush     = MakeBrush(0xFF, 0xA5, 0x2E); // 橙
     private static readonly Brush DoneBrush     = MakeBrush(0x3D, 0xD5, 0x6B); // 绿
+    private static readonly Brush AmbientBrush  = MakeBrush(0xB0, 0xB3, 0xBA); // 信息源（媒体/电池）接管时的柔白圆点
 
     private static readonly Brush TodoDoneBrush    = MakeBrush(0x6E, 0x72, 0x7A); // todo 已完成：暗灰
     private static readonly Brush TodoPendingBrush = MakeBrush(0x9A, 0x9C, 0xA4); // todo 待办：中灰
@@ -112,34 +120,44 @@ public partial class IslandWindow : Window
     // 多个项目并发也互不串台；M3 多药丸时每个 Session 各点亮一颗。
     private sealed class Session
     {
+        public readonly AgentSessionState Agent = new();
         public string Key = "";              // session_id（反查：副点点击 / pin / prune）
-        public DateTime LastActivity;        // 每次 OnEvent 命中刷新；prune 与同权重排序据此
         public string Cwd = "";
-        public string Tool = "";
         public string Model = "—";
         public string Effort = "—";
         public string Context = "—";
         public string CurrentTask = "";
         public IReadOnlyList<TodoItem> Todos = Array.Empty<TodoItem>(); // 多行清单数据源（空数组：渲染端不判 null）
         public string? TranscriptPath;
-        public long LastTranscriptLen = -1; // 上次读取时的文件长度；未变则跳过全量重读（省大会话每事件几 MB 的解析 + LOH 分配）
-        public IslandStatus Status = IslandStatus.Idle;
-        public string StatusText = "";
-        public DateTime TurnStart;
-        public TimeSpan LastTurnElapsed = TimeSpan.Zero;
-        public bool TurnRunning;
+        public long LastTranscriptLen = -1; // 上次成功读取 usage 时的文件长度；失败不推进，避免错过最终读数
+        public TranscriptReader.TaskSnapshotCursor TaskCursor = new();
+        public bool TranscriptReadInFlight;
+        public DateTime? ToolHoldDue;
+
+        public DateTime LastActivity { get => Agent.LastActivity; set => Agent.LastActivity = value; }
+        public string Tool { get => Agent.Tool; set => Agent.Tool = value; }
+        public IslandStatus Status { get => Agent.Status; set => Agent.Status = value; }
+        public string StatusText { get => Agent.StatusText; set => Agent.StatusText = value; }
+        public DateTime TurnStart { get => Agent.TurnStart; set => Agent.TurnStart = value; }
+        public TimeSpan LastTurnElapsed { get => Agent.LastTurnElapsed; set => Agent.LastTurnElapsed = value; }
+        public bool TurnRunning { get => Agent.TurnRunning; set => Agent.TurnRunning = value; }
     }
 
     private readonly Dictionary<string, Session> _sessions = new();
     // —— 多会话渲染状态（M3）——
     private Session? _activeRendered;                       // 主药丸当前渲染的会话（PickActive 选出，脏检查用）
     private IslandStatus _renderedStatus = IslandStatus.Idle; // 主药丸渲染态（脏检查：会话/状态没变不重画）
+    private string _renderedStatusText = "";                 // 主药丸渲染文字（同状态换工具名也要重画）
     private double _renderedSatWidth = 0;                   // 上次渲染的副点区宽度（脏检查：副会话增减/变色也触发横条态重画）
     private Session? _displayed;                            // 详情卡当前显示的会话（hover 中 = pin 或主会话）
-    private Session? _toolHoldTarget;                       // _toolHoldTimer 武装时的目标会话（只对它回落）
     private string? _pinnedKey;                             // 用户在详情卡锁定要看的 session_id；null = 跟随主会话
     private bool _hovering;
     private double _glowUnit; // 周长 / 线宽 = StrokeDashArray 与 StrokeDashOffset 的单位；StartGlow 时缓存供 offset 动画
+
+    // —— 非 agent 信息源（M4）：agent 全空闲时由第一个有内容的源接管主药丸 ——
+    private readonly List<SystemInfo.IInfoSource> _sources = new();
+    private string _ambientGlyph = "";   // 当前接管源的图标（RenderPill 横条态用）
+    private string _ambientText = "";    // 当前接管源的文字
 
     public IslandWindow()
     {
@@ -150,17 +168,12 @@ public partial class IslandWindow : Window
         // 文件没变直接跳过，不会真的每秒全量读 8MB；读到新数据自行 RefreshDetail。只拉当前展示的会话。
         _hoverTimer.Tick += (_, _) => { if (_hovering && _displayed != null) LoadTranscriptAsync(_displayed); };
 
-        // 工具名延迟回落：Tick 到点若目标会话仍是主会话且停在某工具（没被新事件改写），才回「思考中」
+        // 工具名延迟回落：每个会话各自有到期时间；一个 UI timer 扫描所有到期项，避免多会话互相覆盖。
         _toolHoldTimer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(ToolHoldSeconds) };
         _toolHoldTimer.Tick += (_, _) =>
         {
             _toolHoldTimer.Stop();
-            var t = _toolHoldTarget;
-            if (t != null && t.Status == IslandStatus.RunningTool)
-            {
-                ApplyStatus(t, IslandStatus.Thinking, "思考中…");
-                RenderActive();
-            }
+            ApplyDueToolHolds(DateTime.Now);
         };
 
         // 多会话生命周期：每 2s 扫一遍——Done 超 DoneLingerSeconds 回落 Idle、Idle 超 IdleEvictSeconds 移除。
@@ -193,7 +206,6 @@ public partial class IslandWindow : Window
             _sessions[key] = s;
         }
         s.Key = key;
-        s.LastActivity = DateTime.Now;
 
         if (!string.IsNullOrEmpty(evt.Cwd)) s.Cwd = evt.Cwd!;
         if (!string.IsNullOrEmpty(evt.Effort)) s.Effort = evt.Effort!;
@@ -201,41 +213,15 @@ public partial class IslandWindow : Window
         if (!string.IsNullOrEmpty(evt.CurrentTask)) s.CurrentTask = evt.CurrentTask!;
         if (evt.Todos is { Count: > 0 }) s.Todos = evt.Todos; // 仅非空覆盖：旧清单在后续非 TodoWrite 事件中保留
 
-        _toolHoldTimer.Stop(); // 任何新事件都取消待回落；PostToolUse 会重新武装
-
-        switch (evt.EventName)
+        var now = DateTime.Now;
+        var eventResult = AgentSessionStateMachine.ApplyEvent(s.Agent, evt, now);
+        if (eventResult.CancelToolHold)
         {
-            case "UserPromptSubmit":
-                s.TurnStart = DateTime.Now; s.TurnRunning = true; s.Tool = "";
-                ApplyStatus(s, IslandStatus.Thinking, "思考中…");
-                break;
-            case "PreToolUse":
-                // TodoWrite 不是“动作”而是进度更新：不抢标题，维持思考态，只更新当前任务。
-                if (string.Equals(evt.Tool, "TodoWrite", StringComparison.OrdinalIgnoreCase))
-                {
-                    ApplyStatus(s, IslandStatus.Thinking, "思考中…");
-                }
-                else
-                {
-                    s.Tool = evt.Tool ?? "工具";
-                    ApplyStatus(s, IslandStatus.RunningTool, s.Tool);
-                }
-                break;
-            case "PostToolUse":
-                // 工具结束不立即回落：保留「⚙ 工具名」~ToolHoldSeconds，毫秒级工具（同秒 Pre+Post）也看得见；
-                // 期间来新事件会在 switch 前 Stop 并重设。只对当前主会话回落（副点只显状态色，无需防抖）。
-                if (s.Status == IslandStatus.RunningTool) { _toolHoldTarget = s; _toolHoldTimer.Start(); }
-                break;
-            case "Notification":
-                // Notification 有两种语义：① 工具权限请求 ② 空闲 60s 等待输入。仅前者是「等待批准」；
-                // 后者若也设 WaitingApproval，会把已完成/空闲态永久误标（此态无自动回落）→ 用户反馈的卡死。
-                if (IsApprovalRequest(evt.Message))
-                    ApplyStatus(s, IslandStatus.WaitingApproval, "等待批准");
-                break;
-            case "Stop":
-                if (s.TurnRunning) { s.LastTurnElapsed = DateTime.Now - s.TurnStart; s.TurnRunning = false; }
-                ApplyStatus(s, IslandStatus.Done, "完成"); // Done 数据回落交给 _pruneTimer（DoneLingerSeconds）
-                break;
+            CancelToolHold(s, now);
+        }
+        if (eventResult.ArmToolHold)
+        {
+            ArmToolHold(s, now);
         }
 
         RenderActive();
@@ -250,22 +236,58 @@ public partial class IslandWindow : Window
         }
     }
 
-    // —— 数据层：只写会话状态，不碰任何 XAML（OnEvent / prune / toolHold 调用）——
-    private void ApplyStatus(Session s, IslandStatus status, string text)
+    private void ArmToolHold(Session s, DateTime now)
     {
-        s.Status = status;
-        s.StatusText = text;
+        s.ToolHoldDue = now + TimeSpan.FromSeconds(ToolHoldSeconds);
+        ScheduleToolHoldTimer(now);
+    }
+
+    private void CancelToolHold(Session s, DateTime now)
+    {
+        if (s.ToolHoldDue == null) return;
+        s.ToolHoldDue = null;
+        ScheduleToolHoldTimer(now);
+    }
+
+    private void ApplyDueToolHolds(DateTime now)
+    {
+        var changed = false;
+        foreach (var s in _sessions.Values)
+        {
+            if (s.ToolHoldDue is not { } due || due > now) continue;
+            s.ToolHoldDue = null;
+            changed |= AgentSessionStateMachine.ApplyToolHoldElapsed(s.Agent);
+        }
+
+        if (changed) RenderActive();
+        ScheduleToolHoldTimer(now);
+    }
+
+    private void ScheduleToolHoldTimer(DateTime now)
+    {
+        DateTime? nextDue = null;
+        foreach (var s in _sessions.Values)
+        {
+            if (s.ToolHoldDue == null) continue;
+            if (nextDue == null || s.ToolHoldDue < nextDue) nextDue = s.ToolHoldDue;
+        }
+
+        if (nextDue == null)
+        {
+            _toolHoldTimer.Stop();
+            return;
+        }
+
+        var delay = nextDue.Value - now;
+        if (delay < TimeSpan.FromMilliseconds(1))
+            delay = TimeSpan.FromMilliseconds(1);
+        _toolHoldTimer.Interval = delay;
+        _toolHoldTimer.Stop();
+        _toolHoldTimer.Start();
     }
 
     // —— 优先级选主：WaitingApproval > RunningTool > Thinking > Done > Idle，同权重取最近活动 ——
-    private static int Weight(IslandStatus s) => s switch
-    {
-        IslandStatus.WaitingApproval => 4,
-        IslandStatus.RunningTool     => 3,
-        IslandStatus.Thinking        => 2,
-        IslandStatus.Done            => 1,
-        _                            => 0
-    };
+    private static int Weight(IslandStatus s) => AgentSessionStateMachine.Weight(s);
 
     private Session? PickActive()
     {
@@ -280,18 +302,48 @@ public partial class IslandWindow : Window
         return best;
     }
 
+    // —— 非 agent 信息源（M4）：注册 + 选取当前接管源 ——
+    /// <summary>注册一个信息源并启动；其 Changed 事件由 App 切回 UI 线程后调 OnSourceChanged。</summary>
+    public void AddSource(SystemInfo.IInfoSource src)
+    {
+        _sources.Add(src);
+        src.Start();
+    }
+
+    /// <summary>信息源数据变化（已在 UI 线程）：仅 agent 全空闲时才可能影响显示，重画即可。</summary>
+    public void OnSourceChanged() => RenderActive();
+
+    // 第一个有内容（Label 非空）的信息源；媒体优先于电池（注册顺序决定）。无则 null。
+    private SystemInfo.IInfoSource? ActiveInfoSource()
+    {
+        foreach (var src in _sources)
+            if (!string.IsNullOrEmpty(src.Label)) return src;
+        return null;
+    }
+
     // —— 调度层：选主会话、脏检查后重画主药丸、刷副点、hover 时刷详情卡 ——
     private void RenderActive()
     {
         var pick = PickActive();
         double satW = SatelliteStripWidth();
+        // 空闲时信息源接管：把接管源的内容纳入脏检查（换歌/电量变化也要重画）。
+        var src = (pick == null || pick.Status == IslandStatus.Idle) ? ActiveInfoSource() : null;
+        string ambGlyph = src?.Glyph ?? "";
+        string ambText = src?.Label ?? "";
+        string statusText = pick?.StatusText ?? "";
         if (!ReferenceEquals(pick, _activeRendered)
             || (pick?.Status ?? IslandStatus.Idle) != _renderedStatus
-            || satW != _renderedSatWidth)
+            || statusText != _renderedStatusText
+            || satW != _renderedSatWidth
+            || ambGlyph != _ambientGlyph
+            || ambText != _ambientText)
         {
             _activeRendered = pick;
             _renderedStatus = pick?.Status ?? IslandStatus.Idle;
+            _renderedStatusText = statusText;
             _renderedSatWidth = satW;
+            _ambientGlyph = ambGlyph;
+            _ambientText = ambText;
             RenderPill(pick); // _compactWidth 重算（含副点区）→ 横条态宽度对称跟随
         }
         RenderSatellites();
@@ -313,11 +365,14 @@ public partial class IslandWindow : Window
         List<string>? remove = null;
         foreach (var (key, s) in _sessions)
         {
-            if (s.Status == IslandStatus.Done && (now - s.LastActivity).TotalSeconds > DoneLingerSeconds)
+            var result = AgentSessionStateMachine.Prune(s.Agent, now);
+            if (result.Changed)
             {
-                s.Status = IslandStatus.Idle; s.StatusText = ""; changed = true;
+                changed = true;
+                if (s.Status != IslandStatus.RunningTool)
+                    s.ToolHoldDue = null;
             }
-            if (s.Status == IslandStatus.Idle && (now - s.LastActivity).TotalSeconds > IdleEvictSeconds)
+            if (result.Remove)
             {
                 (remove ??= new()).Add(key); changed = true;
             }
@@ -327,6 +382,7 @@ public partial class IslandWindow : Window
 
         if (changed)
         {
+            ScheduleToolHoldTimer(now);
             RenderActive();
             // 全空 / 全 Idle 时把堆与工作集还给 OS
             bool allIdle = true;
@@ -355,16 +411,28 @@ public partial class IslandWindow : Window
         _current = status;
         _statusText = text;
 
-        Dot.Fill = ColorFor(status);
+        // 空闲时信息源（M4）：有 ambient 内容则接管药丸显示，覆盖 idle 暗色外观
+        bool ambient = status == IslandStatus.Idle && !string.IsNullOrEmpty(_ambientText);
+        Dot.Fill = ambient ? AmbientBrush : ColorFor(status);
         // 横条态宽度 = 主状态宽 + 副点区宽（分隔条 + 副点）。药丸 HorizontalAlignment=Center + 对称变宽 → 整组居中，无右挂。
-        _compactWidth = (status == IslandStatus.Idle ? CompactWidth : MeasureWidth(text)) + SatelliteStripWidth();
+        _compactWidth = (status == IslandStatus.Idle && !ambient
+                            ? CompactWidth
+                            : MeasureWidth(ambient ? _ambientText : text, hasIcon: ambient && !string.IsNullOrEmpty(_ambientGlyph)))
+                        + SatelliteStripWidth();
 
         if (!_hovering)
         {
-            if (status == IslandStatus.Idle)
+            if (status == IslandStatus.Idle && !ambient)
             {
                 AnimateWidth(CompactWidth, expanding: false);
                 AnimateLabelOpacity(0.0, clearWhenDone: true);
+            }
+            else if (ambient)
+            {
+                Label.Visibility = Visibility.Visible;
+                SetAmbientLabel(_ambientGlyph, _ambientText);
+                AnimateWidth(_compactWidth, expanding: true);
+                AnimateLabelOpacity(1.0);
             }
             else
             {
@@ -376,7 +444,7 @@ public partial class IslandWindow : Window
         }
         else
         {
-            // idle 隐藏文字让圆点单独居中；非 idle 显示状态文字（与 EnterDetail 一致）
+            // hover 展开：idle/ambient 均隐藏文字让圆点单独居中；非 idle 显示状态文字
             if (status == IslandStatus.Idle)
             {
                 Label.Inlines.Clear();
@@ -595,22 +663,13 @@ public partial class IslandWindow : Window
         AnimatePill(DetailWidth, DetailTargetHeight(), 0.29);
     }
 
-
-    // 空闲提醒 "Claude is waiting for your input" 不含 → false，不误报「等待批准」。message 缺失也按非权限处理。
-    private static bool IsApprovalRequest(string? message)
-    {
-        if (string.IsNullOrEmpty(message)) return false;
-        return message.Contains("permission", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("approve", StringComparison.OrdinalIgnoreCase)
-            || message.Contains("approval", StringComparison.OrdinalIgnoreCase);
-    }
-
     private static Brush ColorFor(IslandStatus s) => s switch
     {
         IslandStatus.Thinking        => ThinkingBrush,
         IslandStatus.RunningTool     => ToolBrush,
         IslandStatus.WaitingApproval => WaitBrush,
         IslandStatus.Done            => DoneBrush,
+        IslandStatus.Ambient         => AmbientBrush,
         _                            => IdleBrush
     };
 
@@ -636,6 +695,14 @@ public partial class IslandWindow : Window
         Label.Inlines.Clear();
         var g = IconForStatus(status);
         if (g != null) AddIconRun(Label, g, text);
+        else Label.Inlines.Add(new Run(text));
+    }
+
+    // 信息源（M4）接管时的标签：图标（媒体音符 / 电池）+ 文字（歌名 / 电量）
+    private void SetAmbientLabel(string glyph, string text)
+    {
+        Label.Inlines.Clear();
+        if (!string.IsNullOrEmpty(glyph)) AddIconRun(Label, glyph, text);
         else Label.Inlines.Add(new Run(text));
     }
 
@@ -681,13 +748,20 @@ public partial class IslandWindow : Window
 
         BeginDouble(DetailPanel, OpacityProperty, 0.0, 0.23);
 
-        double targetW = _current == IslandStatus.Idle ? CompactWidth : _compactWidth;
+        bool ambient = _current == IslandStatus.Idle && !string.IsNullOrEmpty(_ambientText);
+        double targetW = _current == IslandStatus.Idle && !ambient ? CompactWidth : _compactWidth;
         AnimatePill(targetW, PillCompactHeight, 0.36, expanding: false);
         AnimateRadius(14, 0.36);
 
-        if (_current == IslandStatus.Idle)
+        if (_current == IslandStatus.Idle && !ambient)
         {
             AnimateLabelOpacity(0.0, clearWhenDone: true);
+        }
+        else if (ambient)
+        {
+            Label.Visibility = Visibility.Visible;
+            SetAmbientLabel(_ambientGlyph, _ambientText);
+            AnimateLabelOpacity(1.0);
         }
         else
         {
@@ -829,19 +903,26 @@ public partial class IslandWindow : Window
     {
         var path = s.TranscriptPath;
         if (string.IsNullOrEmpty(path)) return;
+        if (s.TranscriptReadInFlight) return;
+
+        s.TranscriptReadInFlight = true;
+        var lastTranscriptLen = s.LastTranscriptLen;
+        var taskCursor = s.TaskCursor;
         Task.Run(() =>
         {
-            // 文件长度未变 → transcript 无新内容，跳过全量读取（大会话每次几 MB 解析 + LOH 分配的元凶）。
+            // usage 仍按文件长度去重；长度只有在 ReadLatest 成功后才回写，失败不缓存为成功。
+            long len = -1;
+            bool readUsage = true;
             try
             {
-                long len = new System.IO.FileInfo(path!).Length;
-                if (len == s.LastTranscriptLen) return;
-                s.LastTranscriptLen = len;
+                len = new System.IO.FileInfo(path!).Length;
+                if (len == lastTranscriptLen) readUsage = false;
             }
             catch { }
-            var snap = TranscriptReader.ReadLatest(path!);
-            var taskSnap = TranscriptReader.ReadTaskSnapshot(path!);
-            if (snap is not { } v)
+
+            var snap = readUsage ? TranscriptReader.ReadLatest(path!) : null;
+            var taskSnap = TranscriptReader.ReadTaskSnapshotIncremental(path!, taskCursor);
+            if (readUsage && snap is not { })
             {
                 // 仅在读取失败时留一行线索，正常路径不刷日志。
                 try
@@ -853,8 +934,12 @@ public partial class IslandWindow : Window
             }
             Dispatcher.InvokeAsync(() =>
             {
+                s.TranscriptReadInFlight = false;
+                s.TaskCursor = taskSnap.Cursor;
+
                 if (snap is { } latest)
                 {
+                    if (len >= 0) s.LastTranscriptLen = len;
                     var model = PrettyModel(latest.Model) ?? s.Model;
                     var context = FormatContext(latest.UsedTokens, latest.ContextSize);
                     if (model != s.Model || context != s.Context)
@@ -943,11 +1028,12 @@ public partial class IslandWindow : Window
         return segs.Length == 0 ? cwd : segs[^1];
     }
 
-    private double MeasureWidth(string text)
+    private double MeasureWidth(string text, bool hasIcon = false)
     {
         _measure.Text = text;
         _measure.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        double iconW = IconForStatus(_current) != null ? _measure.FontSize * 1.2 : 0;
+        // ambient（信息源接管）时 _current 仍是 Idle，靠 hasIcon 显式计入图标宽
+        double iconW = (hasIcon || IconForStatus(_current) != null) ? _measure.FontSize * 1.2 : 0;
         return SidePadding * 2 + DotSize + LabelLeftGap + _measure.DesiredSize.Width + iconW + 2;
     }
 
